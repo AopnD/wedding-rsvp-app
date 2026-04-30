@@ -23,3 +23,9 @@ __pycache__/
 # Build
 dist/
 build/
+
+# Local app data
+data/
+*.db
+*.sqlite
+*.sqlite3
