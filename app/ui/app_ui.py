@@ -9,25 +9,49 @@ from app.core.database import SessionLocal, create_database
 from app.importers.guest_import_service import GuestImportError, import_guest_file
 from app.importers.guest_validator import ValidationResult
 from app.services.event_service import create_event
-from app.services.guest_import_db_service import import_valid_guests_to_database
+from app.services.guest_import_db_service import import_valid_guest_rows_to_database
 from app.services.guest_query_service import list_guests_for_event
+from app.services.reset_service import delete_all_local_data
 
 
 logger = logging.getLogger(__name__)
+
+
+PREVIEW_ROW_LIMIT = 100
 
 
 class AppState:
     """
     Small in-memory UI state.
 
-    This keeps Chunk 4 simple.
-    Later we can replace this with a more formal app controller if needed.
+    This keeps the alpha version simple.
+    Later we can replace this with a more formal app controller.
     """
 
     def __init__(self) -> None:
         self.event_id: int | None = None
+
+        self.couple_names: str | None = None
+        self.wedding_date: str | None = None
+        self.venue_name: str | None = None
+        self.venue_address: str | None = None
+
         self.selected_file_path: Path | None = None
         self.validation_result: ValidationResult | None = None
+
+    def clear_import_state(self) -> None:
+        self.selected_file_path = None
+        self.validation_result = None
+
+    def clear_all(self) -> None:
+        self.event_id = None
+
+        self.couple_names = None
+        self.wedding_date = None
+        self.venue_name = None
+        self.venue_address = None
+
+        self.clear_import_state()
 
 
 def main(page: ft.Page) -> None:
@@ -36,10 +60,11 @@ def main(page: ft.Page) -> None:
     state = AppState()
 
     page.title = "Local Wedding RSVP"
-    page.window_width = 1000
-    page.window_height = 750
+    page.window_width = 1050
+    page.window_height = 780
     page.padding = 24
     page.theme_mode = ft.ThemeMode.LIGHT
+    page.scroll = ft.ScrollMode.AUTO
 
     status_text = ft.Text("", color=ft.Colors.RED_700)
 
@@ -52,34 +77,116 @@ def main(page: ft.Page) -> None:
         page.controls.clear()
         page.add(status_text)
 
+    def section_card(title: str, controls: list[ft.Control]) -> ft.Container:
+        return ft.Container(
+            content=ft.Column(
+                controls=[
+                    ft.Text(title, size=20, weight=ft.FontWeight.BOLD),
+                    *controls,
+                ],
+                spacing=12,
+            ),
+            padding=18,
+            border=ft.border.all(1, ft.Colors.GREY_300),
+            border_radius=12,
+            bgcolor=ft.Colors.WHITE,
+        )
+
+    def table_container(table: ft.DataTable, height: int = 280) -> ft.Container:
+        return ft.Container(
+            content=ft.Column(
+                controls=[
+                    ft.Row(
+                        controls=[table],
+                        scroll=ft.ScrollMode.AUTO,
+                    )
+                ],
+                scroll=ft.ScrollMode.AUTO,
+            ),
+            height=height,
+            border=ft.border.all(1, ft.Colors.GREY_300),
+            border_radius=10,
+            padding=8,
+        )
+
+    def show_reset_dialog() -> None:
+        def close_dialog() -> None:
+            dialog.open = False
+            page.update()
+
+        def on_confirm_reset(_: ft.ControlEvent) -> None:
+            db = SessionLocal()
+
+            try:
+                delete_all_local_data(db)
+                state.clear_all()
+                close_dialog()
+                set_status("All local test data was deleted.")
+                render_setup_screen()
+
+            except Exception:
+                logger.exception("Failed to delete local test data")
+                close_dialog()
+                set_status("Something went wrong while deleting local test data.", is_error=True)
+
+            finally:
+                db.close()
+
+        dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Delete local test data?"),
+            content=ft.Text(
+                "This will delete all local events, guests, messages, and RSVPs "
+                "from the SQLite database. This is useful while testing the alpha app."
+            ),
+            actions=[
+                ft.TextButton("Cancel", on_click=lambda _: close_dialog()),
+                ft.ElevatedButton(
+                    "Delete test data",
+                    bgcolor=ft.Colors.RED_700,
+                    color=ft.Colors.WHITE,
+                    on_click=on_confirm_reset,
+                ),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+
+        page.dialog = dialog
+        dialog.open = True
+        page.update()
+
     def render_setup_screen() -> None:
         clear_page()
 
         couple_names = ft.TextField(
             label="Couple names",
             hint_text="Example: Omer & Dana",
-            width=500,
+            width=520,
+            value=state.couple_names or "",
         )
 
         wedding_date = ft.TextField(
             label="Wedding date",
             hint_text="Example: 2026-09-01",
-            width=500,
+            width=520,
+            value=state.wedding_date or "",
         )
 
         venue_name = ft.TextField(
             label="Venue name",
             hint_text="Example: The Garden Hall",
-            width=500,
+            width=520,
+            value=state.venue_name or "",
         )
 
         venue_address = ft.TextField(
             label="Venue address",
             hint_text="Optional",
-            width=500,
+            width=520,
             multiline=True,
             min_lines=2,
             max_lines=4,
+            value=state.venue_address or "",
         )
 
         def on_continue(_: ft.ControlEvent) -> None:
@@ -87,40 +194,48 @@ def main(page: ft.Page) -> None:
                 set_status("Please enter the couple names.", is_error=True)
                 return
 
-            db = SessionLocal()
+            state.couple_names = couple_names.value.strip()
+            state.wedding_date = wedding_date.value.strip() if wedding_date.value else None
+            state.venue_name = venue_name.value.strip() if venue_name.value else None
+            state.venue_address = venue_address.value.strip() if venue_address.value else None
 
-            try:
-                event = create_event(
-                    db=db,
-                    couple_names=couple_names.value,
-                    wedding_date=wedding_date.value,
-                    venue_name=venue_name.value,
-                    venue_address=venue_address.value,
-                )
+            state.clear_import_state()
 
-                state.event_id = event.id
-                set_status("Event created successfully.")
-                render_upload_screen()
-
-            except Exception:
-                logger.exception("Failed to create event")
-                set_status("Something went wrong while creating the event.", is_error=True)
-
-            finally:
-                db.close()
+            set_status("Wedding details saved. No database event has been created yet.")
+            render_upload_screen()
 
         page.add(
             ft.Column(
                 controls=[
-                    ft.Text("Setup", size=32, weight=ft.FontWeight.BOLD),
-                    ft.Text("Enter the basic wedding details."),
-                    couple_names,
-                    wedding_date,
-                    venue_name,
-                    venue_address,
-                    ft.ElevatedButton("Continue to upload", on_click=on_continue),
+                    ft.Text("Local Wedding RSVP", size=34, weight=ft.FontWeight.BOLD),
+                    ft.Text(
+                        "Step 1 of 3: enter the basic wedding details. "
+                        "The event will only be created after you confirm the guest import."
+                    ),
+                    section_card(
+                        "Wedding details",
+                        [
+                            couple_names,
+                            wedding_date,
+                            venue_name,
+                            venue_address,
+                            ft.Row(
+                                controls=[
+                                    ft.ElevatedButton(
+                                        "Continue to upload",
+                                        on_click=on_continue,
+                                    ),
+                                    ft.TextButton(
+                                        "Delete local test data",
+                                        on_click=lambda _: show_reset_dialog(),
+                                    ),
+                                ],
+                                spacing=12,
+                            ),
+                        ],
+                    ),
                 ],
-                spacing=16,
+                spacing=18,
             )
         )
 
@@ -129,7 +244,11 @@ def main(page: ft.Page) -> None:
     def render_upload_screen() -> None:
         clear_page()
 
-        selected_file_text = ft.Text("No file selected yet.")
+        selected_file_text = ft.Text(
+            f"Selected file: {state.selected_file_path}"
+            if state.selected_file_path
+            else "No file selected yet."
+        )
 
         def on_file_selected(event: ft.FilePickerResultEvent) -> None:
             if not event.files:
@@ -142,6 +261,8 @@ def main(page: ft.Page) -> None:
                 return
 
             state.selected_file_path = Path(selected_file.path)
+            state.validation_result = None
+
             selected_file_text.value = f"Selected file: {state.selected_file_path}"
             set_status("File selected.")
             page.update()
@@ -172,26 +293,31 @@ def main(page: ft.Page) -> None:
                 controls=[
                     ft.Text("Upload guests", size=32, weight=ft.FontWeight.BOLD),
                     ft.Text(
-                        "Upload a CSV or XLSX file with these columns: "
+                        "Step 2 of 3: upload a CSV or XLSX file with these columns: "
                         "name, phone_number, guests_count."
                     ),
-                    ft.ElevatedButton(
-                        "Choose CSV/XLSX file",
-                        on_click=lambda _: file_picker.pick_files(
-                            allow_multiple=False,
-                            allowed_extensions=["csv", "xlsx"],
-                        ),
-                    ),
-                    selected_file_text,
-                    ft.Row(
-                        controls=[
-                            ft.ElevatedButton("Validate file", on_click=on_validate),
-                            ft.TextButton("Back", on_click=lambda _: render_setup_screen()),
+                    section_card(
+                        "Guest file",
+                        [
+                            ft.ElevatedButton(
+                                "Choose CSV/XLSX file",
+                                on_click=lambda _: file_picker.pick_files(
+                                    allow_multiple=False,
+                                    allowed_extensions=["csv", "xlsx"],
+                                ),
+                            ),
+                            selected_file_text,
+                            ft.Row(
+                                controls=[
+                                    ft.ElevatedButton("Validate file", on_click=on_validate),
+                                    ft.TextButton("Back", on_click=lambda _: render_setup_screen()),
+                                ],
+                                spacing=12,
+                            ),
                         ],
-                        spacing=12,
                     ),
                 ],
-                spacing=16,
+                spacing=18,
             )
         )
 
@@ -206,6 +332,9 @@ def main(page: ft.Page) -> None:
             set_status("No validation result found.", is_error=True)
             render_upload_screen()
             return
+
+        valid_preview_rows = result.valid_rows[:PREVIEW_ROW_LIMIT]
+        invalid_preview_rows = result.invalid_rows[:PREVIEW_ROW_LIMIT]
 
         valid_rows_table = ft.DataTable(
             columns=[
@@ -223,7 +352,7 @@ def main(page: ft.Page) -> None:
                         ft.DataCell(ft.Text(str(row.guests_count))),
                     ]
                 )
-                for row in result.valid_rows
+                for row in valid_preview_rows
             ],
         )
 
@@ -239,31 +368,60 @@ def main(page: ft.Page) -> None:
                         ft.DataCell(ft.Text(", ".join(row.errors))),
                     ]
                 )
-                for row in result.invalid_rows
+                for row in invalid_preview_rows
             ],
         )
 
-        def on_import_valid_rows(_: ft.ControlEvent) -> None:
-            if state.event_id is None:
-                set_status("No event was created yet.", is_error=True)
-                return
+        def ensure_event_exists(db) -> int:
+            """
+            Create the event only at the final confirmed import step.
 
+            This avoids empty events if the user goes back, closes the app,
+            or validates files without importing.
+            """
+
+            if state.event_id is not None:
+                return state.event_id
+
+            if not state.couple_names:
+                raise ValueError("Missing couple names. Please return to setup.")
+
+            event = create_event(
+                db=db,
+                couple_names=state.couple_names,
+                wedding_date=state.wedding_date,
+                venue_name=state.venue_name,
+                venue_address=state.venue_address,
+            )
+
+            state.event_id = event.id
+            return event.id
+
+        def on_import_valid_rows(_: ft.ControlEvent) -> None:
             if state.selected_file_path is None:
                 set_status("No file selected.", is_error=True)
+                return
+
+            if state.validation_result is None:
+                set_status("Please validate the file before importing.", is_error=True)
                 return
 
             db = SessionLocal()
 
             try:
-                saved_count, invalid_count = import_valid_guests_to_database(
+                event_id = ensure_event_exists(db)
+
+                import_result = import_valid_guest_rows_to_database(
                     db=db,
-                    file_path=state.selected_file_path,
-                    event_id=state.event_id,
+                    valid_rows=state.validation_result.valid_rows,
+                    event_id=event_id,
+                    invalid_count=len(state.validation_result.invalid_rows),
                 )
 
                 set_status(
-                    f"Import finished. Saved {saved_count} guests. "
-                    f"Skipped {invalid_count} invalid rows."
+                    f"Import finished. Saved {import_result.saved_count} guests. "
+                    f"Skipped {import_result.invalid_count} invalid rows and "
+                    f"{import_result.duplicate_count} duplicate guests."
                 )
 
                 render_dashboard_screen()
@@ -275,18 +433,63 @@ def main(page: ft.Page) -> None:
             finally:
                 db.close()
 
+        valid_preview_note = ""
+        if len(result.valid_rows) > PREVIEW_ROW_LIMIT:
+            valid_preview_note = (
+                f" Showing first {PREVIEW_ROW_LIMIT} valid rows only."
+            )
+
+        invalid_preview_note = ""
+        if len(result.invalid_rows) > PREVIEW_ROW_LIMIT:
+            invalid_preview_note = (
+                f" Showing first {PREVIEW_ROW_LIMIT} invalid rows only."
+            )
+
         page.add(
             ft.Column(
                 controls=[
                     ft.Text("Validation result", size=32, weight=ft.FontWeight.BOLD),
-                    ft.Text(f"Valid rows: {len(result.valid_rows)}"),
-                    ft.Text(f"Invalid rows: {len(result.invalid_rows)}"),
-                    ft.Divider(),
-                    ft.Text("Valid guests", size=20, weight=ft.FontWeight.BOLD),
-                    valid_rows_table if result.valid_rows else ft.Text("No valid guests found."),
-                    ft.Divider(),
-                    ft.Text("Invalid rows", size=20, weight=ft.FontWeight.BOLD),
-                    invalid_rows_table if result.invalid_rows else ft.Text("No invalid rows found."),
+                    ft.Text(
+                        "Step 3 of 3: review the file. "
+                        "The event and guests will be saved only after you click import."
+                    ),
+                    section_card(
+                        "Summary",
+                        [
+                            ft.Text(f"Valid rows: {len(result.valid_rows)}"),
+                            ft.Text(f"Invalid rows: {len(result.invalid_rows)}"),
+                            ft.Text(
+                                "Duplicate protection: if this event already contains a guest "
+                                "with the same phone number, that guest will be skipped."
+                            ),
+                        ],
+                    ),
+                    section_card(
+                        "Valid guests",
+                        [
+                            ft.Text(
+                                "No valid guests found."
+                                if not result.valid_rows
+                                else f"Previewing valid guests.{valid_preview_note}"
+                            ),
+                            table_container(valid_rows_table)
+                            if result.valid_rows
+                            else ft.Container(),
+                        ],
+                    ),
+                    section_card(
+                        "Invalid rows",
+                        [
+                            ft.Text(
+                                "No invalid rows found."
+                                if not result.invalid_rows
+                                else f"Previewing invalid rows.{invalid_preview_note}"
+                            ),
+                            table_container(invalid_rows_table)
+                            if result.invalid_rows
+                            else ft.Container(),
+                        ],
+                    ),
                     ft.Row(
                         controls=[
                             ft.ElevatedButton(
@@ -294,13 +497,15 @@ def main(page: ft.Page) -> None:
                                 on_click=on_import_valid_rows,
                                 disabled=not result.valid_rows,
                             ),
-                            ft.TextButton("Back to upload", on_click=lambda _: render_upload_screen()),
+                            ft.TextButton(
+                                "Back to upload",
+                                on_click=lambda _: render_upload_screen(),
+                            ),
                         ],
                         spacing=12,
                     ),
                 ],
-                spacing=16,
-                scroll=ft.ScrollMode.AUTO,
+                spacing=18,
             )
         )
 
@@ -327,6 +532,8 @@ def main(page: ft.Page) -> None:
         finally:
             db.close()
 
+        guest_preview_rows = guests[:PREVIEW_ROW_LIMIT]
+
         guests_table = ft.DataTable(
             columns=[
                 ft.DataColumn(ft.Text("ID")),
@@ -349,16 +556,41 @@ def main(page: ft.Page) -> None:
                         ),
                     ]
                 )
-                for guest in guests
+                for guest in guest_preview_rows
             ],
         )
+
+        preview_note = ""
+        if len(guests) > PREVIEW_ROW_LIMIT:
+            preview_note = f" Showing first {PREVIEW_ROW_LIMIT} guests only."
 
         page.add(
             ft.Column(
                 controls=[
                     ft.Text("Dashboard", size=32, weight=ft.FontWeight.BOLD),
-                    ft.Text(f"Imported guests: {len(guests)}"),
-                    guests_table if guests else ft.Text("No guests imported yet."),
+                    section_card(
+                        "Current event",
+                        [
+                            ft.Text(f"Couple names: {state.couple_names or 'Unknown'}"),
+                            ft.Text(f"Imported guests: {len(guests)}"),
+                            ft.Text(
+                                "Telegram matching and RSVP status will be added in later chunks."
+                            ),
+                        ],
+                    ),
+                    section_card(
+                        "Guests",
+                        [
+                            ft.Text(
+                                "No guests imported yet."
+                                if not guests
+                                else f"Imported guest preview.{preview_note}"
+                            ),
+                            table_container(guests_table, height=360)
+                            if guests
+                            else ft.Container(),
+                        ],
+                    ),
                     ft.Row(
                         controls=[
                             ft.ElevatedButton(
@@ -369,12 +601,15 @@ def main(page: ft.Page) -> None:
                                 "Start new event",
                                 on_click=lambda _: render_setup_screen(),
                             ),
+                            ft.TextButton(
+                                "Delete local test data",
+                                on_click=lambda _: show_reset_dialog(),
+                            ),
                         ],
                         spacing=12,
                     ),
                 ],
-                spacing=16,
-                scroll=ft.ScrollMode.AUTO,
+                spacing=18,
             )
         )
 

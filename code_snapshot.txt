@@ -1,0 +1,1431 @@
+
+
+===== app\__init__.py =====
+
+
+
+===== app\backend\api.py =====
+
+
+
+===== app\config\settings.py =====
+
+
+
+===== app\core\__init__.py =====
+
+
+
+===== app\core\config.py =====
+
+from pathlib import Path
+
+
+BASE_DIR = Path(__file__).resolve().parents[2]
+
+DATA_DIR = BASE_DIR / "data"
+DATABASE_PATH = DATA_DIR / "rsvp_app.db"
+
+DATABASE_URL = f"sqlite:///{DATABASE_PATH}"
+
+
+===== app\core\database.py =====
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import DeclarativeBase, sessionmaker
+
+from app.core.config import DATA_DIR, DATABASE_URL
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+engine = create_engine(
+    DATABASE_URL,
+    echo=False,
+    connect_args={"check_same_thread": False},
+)
+
+SessionLocal = sessionmaker(
+    bind=engine,
+    autoflush=False,
+    autocommit=False,
+)
+
+
+def create_database() -> None:
+    """
+    Create the local data folder and all database tables.
+    """
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Import models here so SQLAlchemy knows about them before creating tables.
+    from app.models import event, guest, message, rsvp  # noqa: F401
+
+    Base.metadata.create_all(bind=engine)
+
+
+def get_db_session():
+    """
+    Small helper for scripts and later for the app services.
+    """
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+===== app\importers\__init__.py =====
+
+
+
+===== app\importers\guest_file_reader.py =====
+
+from __future__ import annotations
+
+import csv
+from pathlib import Path
+from typing import Any
+
+from openpyxl import load_workbook
+
+
+SUPPORTED_FILE_EXTENSIONS = {".csv", ".xlsx"}
+
+
+class GuestFileReadError(Exception):
+    """Raised when a guest file cannot be read."""
+
+
+def read_guest_file(file_path: str | Path) -> tuple[list[dict[str, Any]], set[str]]:
+    """
+    Read guest data from a CSV or Excel file.
+
+    Returns:
+    - rows: list of dictionaries
+    - columns: normalized column names found in the file
+    """
+
+    path = Path(file_path)
+
+    if not path.exists():
+        raise GuestFileReadError(f"File does not exist: {path}")
+
+    if not path.is_file():
+        raise GuestFileReadError(f"Path is not a file: {path}")
+
+    extension = path.suffix.lower()
+
+    if extension not in SUPPORTED_FILE_EXTENSIONS:
+        raise GuestFileReadError(
+            f"Unsupported file type '{extension}'. Supported types: CSV, XLSX"
+        )
+
+    if extension == ".csv":
+        return _read_csv(path)
+
+    if extension == ".xlsx":
+        return _read_xlsx(path)
+
+    raise GuestFileReadError(f"Unsupported file type: {extension}")
+
+
+def _read_csv(path: Path) -> tuple[list[dict[str, Any]], set[str]]:
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as file:
+            reader = csv.DictReader(file)
+
+            if reader.fieldnames is None:
+                raise GuestFileReadError("CSV file has no header row")
+
+            normalized_headers = [_normalize_column_name(name) for name in reader.fieldnames]
+            columns = set(normalized_headers)
+
+            rows: list[dict[str, Any]] = []
+
+            for index, row in enumerate(reader, start=2):
+                normalized_row = {
+                    _normalize_column_name(key): value
+                    for key, value in row.items()
+                    if key is not None
+                }
+
+                normalized_row["_row_number"] = index
+                rows.append(normalized_row)
+
+            return rows, columns
+
+    except UnicodeDecodeError as exc:
+        raise GuestFileReadError(
+            "Could not read CSV file. Please save it as UTF-8 CSV and try again."
+        ) from exc
+    except csv.Error as exc:
+        raise GuestFileReadError("Could not parse CSV file") from exc
+
+
+def _read_xlsx(path: Path) -> tuple[list[dict[str, Any]], set[str]]:
+    try:
+        workbook = load_workbook(
+            filename=path,
+            read_only=True,
+            data_only=True,
+        )
+    except Exception as exc:
+        raise GuestFileReadError("Could not open Excel file") from exc
+
+    worksheet = workbook.active
+
+    rows_iterator = worksheet.iter_rows(values_only=True)
+
+    try:
+        header_row = next(rows_iterator)
+    except StopIteration as exc:
+        raise GuestFileReadError("Excel file is empty") from exc
+
+    if not header_row:
+        raise GuestFileReadError("Excel file has no header row")
+
+    normalized_headers = [_normalize_column_name(value) for value in header_row]
+    columns = {column for column in normalized_headers if column}
+
+    rows: list[dict[str, Any]] = []
+
+    for excel_row_number, values in enumerate(rows_iterator, start=2):
+        row_data: dict[str, Any] = {}
+
+        for column_name, value in zip(normalized_headers, values):
+            if not column_name:
+                continue
+
+            row_data[column_name] = value
+
+        if _is_empty_row(row_data):
+            continue
+
+        row_data["_row_number"] = excel_row_number
+        rows.append(row_data)
+
+    return rows, columns
+
+
+def _normalize_column_name(value: Any) -> str:
+    if value is None:
+        return ""
+
+    return str(value).strip().lower()
+
+
+def _is_empty_row(row: dict[str, Any]) -> bool:
+    ignored_keys = {"_row_number"}
+
+    for key, value in row.items():
+        if key in ignored_keys:
+            continue
+
+        if value is not None and str(value).strip():
+            return False
+
+    return True
+
+
+===== app\importers\guest_import_service.py =====
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
+from app.importers.guest_file_reader import GuestFileReadError, read_guest_file
+from app.importers.guest_validator import ValidationResult, validate_guest_rows
+
+
+logger = logging.getLogger(__name__)
+
+
+class GuestImportError(Exception):
+    """Raised when guest import fails."""
+
+
+def import_guest_file(
+    file_path: str | Path,
+    default_phone_region: str = "PT",
+) -> ValidationResult:
+    """
+    Import and validate a guest file.
+
+    This function is the main entry point the UI will call later.
+    """
+
+    try:
+        rows, columns = read_guest_file(file_path)
+    except GuestFileReadError as exc:
+        logger.exception("Failed to read guest file: %s", file_path)
+        raise GuestImportError(str(exc)) from exc
+
+    logger.info(
+        "Guest file loaded. file=%s rows=%s columns=%s",
+        file_path,
+        len(rows),
+        sorted(columns),
+    )
+
+    result = validate_guest_rows(
+        rows=rows,
+        columns=columns,
+        default_region=default_phone_region,
+    )
+
+    logger.info(
+        "Guest file validated. valid_rows=%s invalid_rows=%s missing_columns=%s",
+        len(result.valid_rows),
+        len(result.invalid_rows),
+        result.missing_columns,
+    )
+
+    return result
+
+
+===== app\importers\guest_validator.py =====
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+import phonenumbers
+
+
+REQUIRED_COLUMNS = {"name", "phone_number", "guests_count"}
+
+
+@dataclass(frozen=True)
+class ValidGuestRow:
+    row_number: int
+    name: str
+    phone_number: str
+    normalized_phone: str
+    guests_count: int
+
+
+@dataclass(frozen=True)
+class InvalidGuestRow:
+    row_number: int
+    raw_data: dict[str, Any]
+    errors: list[str]
+
+
+@dataclass(frozen=True)
+class ValidationResult:
+    valid_rows: list[ValidGuestRow]
+    invalid_rows: list[InvalidGuestRow]
+    missing_columns: list[str]
+
+
+def validate_guest_rows(
+    rows: list[dict[str, Any]],
+    columns: set[str],
+    default_region: str = "PT",
+) -> ValidationResult:
+    """
+    Validate imported guest rows.
+
+    Required columns:
+    - name
+    - phone_number
+    - guests_count
+
+    Validation rules:
+    - missing columns
+    - invalid phone
+    - duplicate phone
+    - empty name
+    - invalid guest count
+    """
+
+    missing_columns = sorted(REQUIRED_COLUMNS - columns)
+
+    if missing_columns:
+        return ValidationResult(
+            valid_rows=[],
+            invalid_rows=[
+                InvalidGuestRow(
+                    row_number=0,
+                    raw_data={},
+                    errors=[f"Missing required columns: {', '.join(missing_columns)}"],
+                )
+            ],
+            missing_columns=missing_columns,
+        )
+
+    valid_rows: list[ValidGuestRow] = []
+    invalid_rows: list[InvalidGuestRow] = []
+
+    seen_phone_numbers: set[str] = set()
+
+    for row in rows:
+        row_number = int(row.get("_row_number", 0))
+        errors: list[str] = []
+
+        name = _clean_string(row.get("name"))
+        phone_number = _clean_string(row.get("phone_number"))
+        guests_count_raw = row.get("guests_count")
+
+        if not name:
+            errors.append("Name is empty")
+
+        normalized_phone = _normalize_phone_number(
+            phone_number=phone_number,
+            default_region=default_region,
+        )
+
+        if not normalized_phone:
+            errors.append("Phone number is invalid")
+        elif normalized_phone in seen_phone_numbers:
+            errors.append("Duplicate phone number")
+
+        guests_count = _parse_guests_count(guests_count_raw)
+
+        if guests_count is None:
+            errors.append("Guest count is invalid")
+        elif guests_count < 1:
+            errors.append("Guest count must be at least 1")
+        elif guests_count > 20:
+            errors.append("Guest count is unusually high; max allowed is 20")
+
+        if errors:
+            invalid_rows.append(
+                InvalidGuestRow(
+                    row_number=row_number,
+                    raw_data=row,
+                    errors=errors,
+                )
+            )
+            continue
+
+        assert guests_count is not None
+        assert normalized_phone is not None
+
+        seen_phone_numbers.add(normalized_phone)
+
+        valid_rows.append(
+            ValidGuestRow(
+                row_number=row_number,
+                name=name,
+                phone_number=phone_number,
+                normalized_phone=normalized_phone,
+                guests_count=guests_count,
+            )
+        )
+
+    return ValidationResult(
+        valid_rows=valid_rows,
+        invalid_rows=invalid_rows,
+        missing_columns=[],
+    )
+
+
+def _clean_string(value: Any) -> str:
+    if value is None:
+        return ""
+
+    return str(value).strip()
+
+
+def _parse_guests_count(value: Any) -> int | None:
+    if value is None:
+        return None
+
+    if isinstance(value, int):
+        return value
+
+    if isinstance(value, float):
+        if value.is_integer():
+            return int(value)
+        return None
+
+    value_as_text = str(value).strip()
+
+    if not value_as_text:
+        return None
+
+    if not value_as_text.isdigit():
+        return None
+
+    return int(value_as_text)
+
+
+def _normalize_phone_number(
+    phone_number: str,
+    default_region: str,
+) -> str | None:
+    """
+    Normalize phone numbers into E.164 format.
+
+    Example:
+    +351912345678 stays +351912345678.
+    A local Portuguese number like 912345678 becomes +351912345678
+    when default_region='PT'.
+    """
+
+    if not phone_number:
+        return None
+
+    try:
+        parsed_number = phonenumbers.parse(phone_number, default_region)
+    except phonenumbers.NumberParseException:
+        return None
+
+    if not phonenumbers.is_valid_number(parsed_number):
+        return None
+
+    return phonenumbers.format_number(
+        parsed_number,
+        phonenumbers.PhoneNumberFormat.E164,
+    )
+
+
+===== app\main.py =====
+
+from __future__ import annotations
+
+import logging
+
+import flet as ft
+
+from app.ui.app_ui import main
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+
+
+if __name__ == "__main__":
+    ft.app(target=main)
+
+
+===== app\models\__init__.py =====
+
+from app.models.event import Event
+from app.models.guest import Guest
+from app.models.message import Message
+from app.models.rsvp import Rsvp
+
+__all__ = [
+    "Event",
+    "Guest",
+    "Message",
+    "Rsvp",
+]
+
+
+===== app\models\event.py =====
+
+from datetime import datetime
+
+from sqlalchemy import DateTime, Integer, String, Text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.core.database import Base
+
+
+class Event(Base):
+    __tablename__ = "events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    couple_names: Mapped[str] = mapped_column(String(255), nullable=False)
+    wedding_date: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    venue_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    venue_address: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+    guests = relationship(
+        "Guest",
+        back_populates="event",
+        cascade="all, delete-orphan",
+    )
+
+
+===== app\models\guest.py =====
+
+from datetime import datetime
+
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.core.database import Base
+
+
+class Guest(Base):
+    __tablename__ = "guests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    event_id: Mapped[int] = mapped_column(
+        ForeignKey("events.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    full_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    phone_number: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    telegram_username: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    invited_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+
+    is_matched_telegram_contact: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+    event = relationship("Event", back_populates="guests")
+
+    messages = relationship(
+        "Message",
+        back_populates="guest",
+        cascade="all, delete-orphan",
+    )
+
+    rsvps = relationship(
+        "Rsvp",
+        back_populates="guest",
+        cascade="all, delete-orphan",
+    )
+
+
+===== app\models\message.py =====
+
+from datetime import datetime
+
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.core.database import Base
+
+
+class Message(Base):
+    __tablename__ = "messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    guest_id: Mapped[int] = mapped_column(
+        ForeignKey("guests.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(50),
+        default="pending",
+        nullable=False,
+    )
+
+    message_text: Mapped[str] = mapped_column(Text, nullable=False)
+
+    telegram_message_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+    guest = relationship("Guest", back_populates="messages")
+
+
+===== app\models\rsvp.py =====
+
+from datetime import datetime
+
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.core.database import Base
+
+
+class Rsvp(Base):
+    __tablename__ = "rsvps"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+    guest_id: Mapped[int] = mapped_column(
+        ForeignKey("guests.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    response: Mapped[str] = mapped_column(String(50), nullable=False)
+    attending_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    submitted_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
+
+    guest = relationship("Guest", back_populates="rsvps")
+
+
+===== app\scripts\__init__.py =====
+
+
+
+===== app\scripts\init_db.py =====
+
+from app.core.database import create_database
+
+
+def main() -> None:
+    create_database()
+    print("Database created successfully.")
+
+
+if __name__ == "__main__":
+    main()
+
+
+===== app\scripts\test_create_guest.py =====
+
+from sqlalchemy.orm import Session
+
+from app.core.database import SessionLocal, create_database
+from app.models import Event, Guest
+
+
+def create_test_guest(db: Session) -> Guest:
+    event = Event(
+        couple_names="Omer & Partner",
+        wedding_date="2026-09-01",
+        venue_name="Example Venue",
+        venue_address="Example Address",
+    )
+
+    db.add(event)
+    db.commit()
+    db.refresh(event)
+
+    guest = Guest(
+        event_id=event.id,
+        full_name="Test Guest",
+        phone_number="+351900000000",
+        telegram_username=None,
+        invited_count=2,
+        is_matched_telegram_contact=False,
+    )
+
+    db.add(guest)
+    db.commit()
+    db.refresh(guest)
+
+    return guest
+
+
+def main() -> None:
+    create_database()
+
+    db = SessionLocal()
+
+    try:
+        guest = create_test_guest(db)
+        print("Guest created successfully.")
+        print(f"Guest ID: {guest.id}")
+        print(f"Guest name: {guest.full_name}")
+        print(f"Event ID: {guest.event_id}")
+    finally:
+        db.close()
+
+
+if __name__ == "__main__":
+    main()
+
+
+===== app\scripts\test_guest_import.py =====
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from app.importers.guest_import_service import GuestImportError, import_guest_file
+
+
+def main() -> None:
+    file_path = Path("sample_guests.csv")
+
+    try:
+        result = import_guest_file(file_path)
+    except GuestImportError as exc:
+        print(f"Import failed: {exc}")
+        return
+
+    print("\nVALID ROWS")
+    print("-" * 50)
+
+    for row in result.valid_rows:
+        print(
+            f"Row {row.row_number}: "
+            f"name={row.name}, "
+            f"phone={row.normalized_phone}, "
+            f"guests={row.guests_count}"
+        )
+
+    print("\nINVALID ROWS")
+    print("-" * 50)
+
+    for row in result.invalid_rows:
+        print(f"Row {row.row_number}: {', '.join(row.errors)}")
+        print(f"Raw data: {row.raw_data}")
+        print()
+
+
+if __name__ == "__main__":
+    main()
+
+
+===== app\scripts\test_import_guests_to_db.py =====
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from app.core.database import SessionLocal, create_database
+from app.models import Event
+from app.services.guest_import_db_service import import_valid_guests_to_database
+
+
+def create_test_event_if_needed() -> int:
+    """
+    Creates a simple test event and returns its ID.
+
+    Later, the real Flet UI will create/select the event.
+    For now, this gives us a safe event_id to attach imported guests to.
+    """
+
+    db = SessionLocal()
+
+    try:
+        event = Event(
+            couple_names="Omer & Partner",
+            wedding_date="2026-09-01",
+            venue_name="Example Venue",
+            venue_address="Example Address",
+        )
+
+        db.add(event)
+        db.commit()
+        db.refresh(event)
+
+        return event.id
+
+    finally:
+        db.close()
+
+
+def main() -> None:
+    create_database()
+
+    file_path = Path("sample_guests.csv")
+    event_id = create_test_event_if_needed()
+
+    db = SessionLocal()
+
+    try:
+        saved_count, invalid_count = import_valid_guests_to_database(
+            db=db,
+            file_path=file_path,
+            event_id=event_id,
+        )
+
+        print("Guest import finished.")
+        print(f"Event ID: {event_id}")
+        print(f"Saved guests: {saved_count}")
+        print(f"Invalid rows skipped: {invalid_count}")
+
+    finally:
+        db.close()
+
+
+if __name__ == "__main__":
+    main()
+
+
+===== app\scripts\test_list_guests.py =====
+
+from __future__ import annotations
+
+from app.core.database import SessionLocal
+from app.models import Guest
+
+
+def main() -> None:
+    db = SessionLocal()
+
+    try:
+        guests = db.query(Guest).all()
+
+        print(f"Total guests in database: {len(guests)}")
+        print("-" * 50)
+
+        for guest in guests:
+            print(
+                f"id={guest.id}, "
+                f"event_id={guest.event_id}, "
+                f"name={guest.full_name}, "
+                f"phone={guest.phone_number}, "
+                f"invited_count={guest.invited_count}, "
+                f"matched_telegram={guest.is_matched_telegram_contact}"
+            )
+
+    finally:
+        db.close()
+
+
+if __name__ == "__main__":
+    main()
+
+
+===== app\services\event_service.py =====
+
+from __future__ import annotations
+
+import logging
+
+from sqlalchemy.orm import Session
+
+from app.models import Event
+
+
+logger = logging.getLogger(__name__)
+
+
+def create_event(
+    db: Session,
+    couple_names: str,
+    wedding_date: str | None = None,
+    venue_name: str | None = None,
+    venue_address: str | None = None,
+) -> Event:
+    """
+    Create a wedding event.
+
+    In the alpha version, the UI creates one event per app session/import flow.
+    Later we can add event selection/editing.
+    """
+
+    event = Event(
+        couple_names=couple_names.strip(),
+        wedding_date=wedding_date.strip() if wedding_date else None,
+        venue_name=venue_name.strip() if venue_name else None,
+        venue_address=venue_address.strip() if venue_address else None,
+    )
+
+    db.add(event)
+    db.commit()
+    db.refresh(event)
+
+    logger.info("Created event. event_id=%s couple_names=%s", event.id, event.couple_names)
+
+    return event
+
+
+===== app\services\guest_import_db_service.py =====
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
+from sqlalchemy.orm import Session
+
+from app.importers.guest_import_service import import_guest_file
+from app.models import Guest
+
+
+logger = logging.getLogger(__name__)
+
+
+def import_valid_guests_to_database(
+    db: Session,
+    file_path: str | Path,
+    event_id: int,
+    default_phone_region: str = "PT",
+) -> tuple[int, int]:
+    """
+    Import a guest file, validate it, and save only valid rows to the database.
+
+    Only valid rows are saved.
+    Invalid rows are skipped.
+
+    Returns:
+        tuple[int, int]:
+        - number of saved guests
+        - number of invalid rows
+    """
+
+    result = import_guest_file(
+        file_path=file_path,
+        default_phone_region=default_phone_region,
+    )
+
+    saved_count = 0
+
+    for valid_row in result.valid_rows:
+        guest = Guest(
+            event_id=event_id,
+            full_name=valid_row.name,
+            phone_number=valid_row.normalized_phone,
+            telegram_username=None,
+            invited_count=valid_row.guests_count,
+            is_matched_telegram_contact=False,
+        )
+
+        db.add(guest)
+        saved_count += 1
+
+    db.commit()
+
+    logger.info(
+        "Imported valid guests to database. saved=%s invalid=%s file=%s",
+        saved_count,
+        len(result.invalid_rows),
+        file_path,
+    )
+
+    return saved_count, len(result.invalid_rows)
+
+
+===== app\services\guest_query_service.py =====
+
+from __future__ import annotations
+
+from sqlalchemy.orm import Session
+
+from app.models import Guest
+
+
+def list_guests_for_event(db: Session, event_id: int) -> list[Guest]:
+    """
+    Return all guests imported for a specific event.
+    """
+
+    return (
+        db.query(Guest)
+        .filter(Guest.event_id == event_id)
+        .order_by(Guest.id.asc())
+        .all()
+    )
+
+
+===== app\services\rsvp_service.py =====
+
+
+
+===== app\services\telegram_service.py =====
+
+
+
+===== app\ui\app_ui.py =====
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
+import flet as ft
+
+from app.core.database import SessionLocal, create_database
+from app.importers.guest_import_service import GuestImportError, import_guest_file
+from app.importers.guest_validator import ValidationResult
+from app.services.event_service import create_event
+from app.services.guest_import_db_service import import_valid_guests_to_database
+from app.services.guest_query_service import list_guests_for_event
+
+
+logger = logging.getLogger(__name__)
+
+
+class AppState:
+    """
+    Small in-memory UI state.
+
+    This keeps Chunk 4 simple.
+    Later we can replace this with a more formal app controller if needed.
+    """
+
+    def __init__(self) -> None:
+        self.event_id: int | None = None
+        self.selected_file_path: Path | None = None
+        self.validation_result: ValidationResult | None = None
+
+
+def main(page: ft.Page) -> None:
+    create_database()
+
+    state = AppState()
+
+    page.title = "Local Wedding RSVP"
+    page.window_width = 1000
+    page.window_height = 750
+    page.padding = 24
+    page.theme_mode = ft.ThemeMode.LIGHT
+
+    status_text = ft.Text("", color=ft.Colors.RED_700)
+
+    def set_status(message: str, is_error: bool = False) -> None:
+        status_text.value = message
+        status_text.color = ft.Colors.RED_700 if is_error else ft.Colors.GREEN_700
+        page.update()
+
+    def clear_page() -> None:
+        page.controls.clear()
+        page.add(status_text)
+
+    def render_setup_screen() -> None:
+        clear_page()
+
+        couple_names = ft.TextField(
+            label="Couple names",
+            hint_text="Example: Omer & Dana",
+            width=500,
+        )
+
+        wedding_date = ft.TextField(
+            label="Wedding date",
+            hint_text="Example: 2026-09-01",
+            width=500,
+        )
+
+        venue_name = ft.TextField(
+            label="Venue name",
+            hint_text="Example: The Garden Hall",
+            width=500,
+        )
+
+        venue_address = ft.TextField(
+            label="Venue address",
+            hint_text="Optional",
+            width=500,
+            multiline=True,
+            min_lines=2,
+            max_lines=4,
+        )
+
+        def on_continue(_: ft.ControlEvent) -> None:
+            if not couple_names.value or not couple_names.value.strip():
+                set_status("Please enter the couple names.", is_error=True)
+                return
+
+            db = SessionLocal()
+
+            try:
+                event = create_event(
+                    db=db,
+                    couple_names=couple_names.value,
+                    wedding_date=wedding_date.value,
+                    venue_name=venue_name.value,
+                    venue_address=venue_address.value,
+                )
+
+                state.event_id = event.id
+                set_status("Event created successfully.")
+                render_upload_screen()
+
+            except Exception:
+                logger.exception("Failed to create event")
+                set_status("Something went wrong while creating the event.", is_error=True)
+
+            finally:
+                db.close()
+
+        page.add(
+            ft.Column(
+                controls=[
+                    ft.Text("Setup", size=32, weight=ft.FontWeight.BOLD),
+                    ft.Text("Enter the basic wedding details."),
+                    couple_names,
+                    wedding_date,
+                    venue_name,
+                    venue_address,
+                    ft.ElevatedButton("Continue to upload", on_click=on_continue),
+                ],
+                spacing=16,
+            )
+        )
+
+        page.update()
+
+    def render_upload_screen() -> None:
+        clear_page()
+
+        selected_file_text = ft.Text("No file selected yet.")
+
+        def on_file_selected(event: ft.FilePickerResultEvent) -> None:
+            if not event.files:
+                return
+
+            selected_file = event.files[0]
+
+            if not selected_file.path:
+                set_status("Could not read selected file path.", is_error=True)
+                return
+
+            state.selected_file_path = Path(selected_file.path)
+            selected_file_text.value = f"Selected file: {state.selected_file_path}"
+            set_status("File selected.")
+            page.update()
+
+        file_picker = ft.FilePicker(on_result=on_file_selected)
+        page.overlay.append(file_picker)
+
+        def on_validate(_: ft.ControlEvent) -> None:
+            if state.selected_file_path is None:
+                set_status("Please select a CSV or XLSX file first.", is_error=True)
+                return
+
+            try:
+                state.validation_result = import_guest_file(state.selected_file_path)
+                set_status("File validated successfully.")
+                render_validation_screen()
+
+            except GuestImportError as exc:
+                logger.exception("Guest import validation failed")
+                set_status(str(exc), is_error=True)
+
+            except Exception:
+                logger.exception("Unexpected validation error")
+                set_status("Something went wrong while validating the file.", is_error=True)
+
+        page.add(
+            ft.Column(
+                controls=[
+                    ft.Text("Upload guests", size=32, weight=ft.FontWeight.BOLD),
+                    ft.Text(
+                        "Upload a CSV or XLSX file with these columns: "
+                        "name, phone_number, guests_count."
+                    ),
+                    ft.ElevatedButton(
+                        "Choose CSV/XLSX file",
+                        on_click=lambda _: file_picker.pick_files(
+                            allow_multiple=False,
+                            allowed_extensions=["csv", "xlsx"],
+                        ),
+                    ),
+                    selected_file_text,
+                    ft.Row(
+                        controls=[
+                            ft.ElevatedButton("Validate file", on_click=on_validate),
+                            ft.TextButton("Back", on_click=lambda _: render_setup_screen()),
+                        ],
+                        spacing=12,
+                    ),
+                ],
+                spacing=16,
+            )
+        )
+
+        page.update()
+
+    def render_validation_screen() -> None:
+        clear_page()
+
+        result = state.validation_result
+
+        if result is None:
+            set_status("No validation result found.", is_error=True)
+            render_upload_screen()
+            return
+
+        valid_rows_table = ft.DataTable(
+            columns=[
+                ft.DataColumn(ft.Text("Row")),
+                ft.DataColumn(ft.Text("Name")),
+                ft.DataColumn(ft.Text("Phone")),
+                ft.DataColumn(ft.Text("Guests")),
+            ],
+            rows=[
+                ft.DataRow(
+                    cells=[
+                        ft.DataCell(ft.Text(str(row.row_number))),
+                        ft.DataCell(ft.Text(row.name)),
+                        ft.DataCell(ft.Text(row.normalized_phone)),
+                        ft.DataCell(ft.Text(str(row.guests_count))),
+                    ]
+                )
+                for row in result.valid_rows
+            ],
+        )
+
+        invalid_rows_table = ft.DataTable(
+            columns=[
+                ft.DataColumn(ft.Text("Row")),
+                ft.DataColumn(ft.Text("Errors")),
+            ],
+            rows=[
+                ft.DataRow(
+                    cells=[
+                        ft.DataCell(ft.Text(str(row.row_number))),
+                        ft.DataCell(ft.Text(", ".join(row.errors))),
+                    ]
+                )
+                for row in result.invalid_rows
+            ],
+        )
+
+        def on_import_valid_rows(_: ft.ControlEvent) -> None:
+            if state.event_id is None:
+                set_status("No event was created yet.", is_error=True)
+                return
+
+            if state.selected_file_path is None:
+                set_status("No file selected.", is_error=True)
+                return
+
+            db = SessionLocal()
+
+            try:
+                saved_count, invalid_count = import_valid_guests_to_database(
+                    db=db,
+                    file_path=state.selected_file_path,
+                    event_id=state.event_id,
+                )
+
+                set_status(
+                    f"Import finished. Saved {saved_count} guests. "
+                    f"Skipped {invalid_count} invalid rows."
+                )
+
+                render_dashboard_screen()
+
+            except Exception:
+                logger.exception("Failed to import guests to database")
+                set_status("Something went wrong while saving guests.", is_error=True)
+
+            finally:
+                db.close()
+
+        page.add(
+            ft.Column(
+                controls=[
+                    ft.Text("Validation result", size=32, weight=ft.FontWeight.BOLD),
+                    ft.Text(f"Valid rows: {len(result.valid_rows)}"),
+                    ft.Text(f"Invalid rows: {len(result.invalid_rows)}"),
+                    ft.Divider(),
+                    ft.Text("Valid guests", size=20, weight=ft.FontWeight.BOLD),
+                    valid_rows_table if result.valid_rows else ft.Text("No valid guests found."),
+                    ft.Divider(),
+                    ft.Text("Invalid rows", size=20, weight=ft.FontWeight.BOLD),
+                    invalid_rows_table if result.invalid_rows else ft.Text("No invalid rows found."),
+                    ft.Row(
+                        controls=[
+                            ft.ElevatedButton(
+                                "Import valid guests",
+                                on_click=on_import_valid_rows,
+                                disabled=not result.valid_rows,
+                            ),
+                            ft.TextButton("Back to upload", on_click=lambda _: render_upload_screen()),
+                        ],
+                        spacing=12,
+                    ),
+                ],
+                spacing=16,
+                scroll=ft.ScrollMode.AUTO,
+            )
+        )
+
+        page.update()
+
+    def render_dashboard_screen() -> None:
+        clear_page()
+
+        if state.event_id is None:
+            set_status("No event selected.", is_error=True)
+            render_setup_screen()
+            return
+
+        db = SessionLocal()
+
+        try:
+            guests = list_guests_for_event(db=db, event_id=state.event_id)
+
+        except Exception:
+            logger.exception("Failed to load dashboard guests")
+            set_status("Something went wrong while loading guests.", is_error=True)
+            guests = []
+
+        finally:
+            db.close()
+
+        guests_table = ft.DataTable(
+            columns=[
+                ft.DataColumn(ft.Text("ID")),
+                ft.DataColumn(ft.Text("Name")),
+                ft.DataColumn(ft.Text("Phone")),
+                ft.DataColumn(ft.Text("Invited count")),
+                ft.DataColumn(ft.Text("Telegram matched")),
+            ],
+            rows=[
+                ft.DataRow(
+                    cells=[
+                        ft.DataCell(ft.Text(str(guest.id))),
+                        ft.DataCell(ft.Text(guest.full_name)),
+                        ft.DataCell(ft.Text(guest.phone_number or "")),
+                        ft.DataCell(ft.Text(str(guest.invited_count))),
+                        ft.DataCell(
+                            ft.Text(
+                                "Yes" if guest.is_matched_telegram_contact else "No"
+                            )
+                        ),
+                    ]
+                )
+                for guest in guests
+            ],
+        )
+
+        page.add(
+            ft.Column(
+                controls=[
+                    ft.Text("Dashboard", size=32, weight=ft.FontWeight.BOLD),
+                    ft.Text(f"Imported guests: {len(guests)}"),
+                    guests_table if guests else ft.Text("No guests imported yet."),
+                    ft.Row(
+                        controls=[
+                            ft.ElevatedButton(
+                                "Upload another file",
+                                on_click=lambda _: render_upload_screen(),
+                            ),
+                            ft.TextButton(
+                                "Start new event",
+                                on_click=lambda _: render_setup_screen(),
+                            ),
+                        ],
+                        spacing=12,
+                    ),
+                ],
+                spacing=16,
+                scroll=ft.ScrollMode.AUTO,
+            )
+        )
+
+        page.update()
+
+    render_setup_screen()

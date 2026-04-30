@@ -1,0 +1,10 @@
+Get-ChildItem -Recurse -File app -Include *.py |
+Where-Object {
+    $_.FullName -notmatch '\\__pycache__\\' -and
+    $_.FullName -notmatch '\\.venv\\'
+} |
+Sort-Object FullName |
+ForEach-Object {
+    "`n`n===== $($_.FullName.Replace((Get-Location).Path + '\', '')) =====`n"
+    Get-Content $_.FullName
+} | Set-Content code_snapshot.txt

@@ -44,7 +44,7 @@ def main() -> None:
     db = SessionLocal()
 
     try:
-        saved_count, invalid_count = import_valid_guests_to_database(
+        result = import_valid_guests_to_database(
             db=db,
             file_path=file_path,
             event_id=event_id,
@@ -52,8 +52,9 @@ def main() -> None:
 
         print("Guest import finished.")
         print(f"Event ID: {event_id}")
-        print(f"Saved guests: {saved_count}")
-        print(f"Invalid rows skipped: {invalid_count}")
+        print(f"Saved guests: {result.saved_count}")
+        print(f"Invalid rows skipped: {result.invalid_count}")
+        print(f"Duplicate guests skipped: {result.duplicate_count}")
 
     finally:
         db.close()
