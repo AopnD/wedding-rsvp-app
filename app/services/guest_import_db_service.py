@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.importers.guest_import_service import import_guest_file
 from app.importers.guest_validator import ValidGuestRow
 from app.models import Guest
+from app.services.invite_code_service import generate_unique_invite_code
 
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,7 @@ def import_valid_guest_rows_to_database(
     - Only saves valid rows.
     - Skips phone numbers that already exist for the same event.
     - Prevents duplicate imports if the same file is imported twice.
+    - Creates one private invite code per saved guest.
     """
 
     existing_phone_numbers = {
@@ -57,6 +59,7 @@ def import_valid_guest_rows_to_database(
             full_name=valid_row.name,
             phone_number=valid_row.normalized_phone,
             telegram_username=None,
+            invite_code=generate_unique_invite_code(db),
             invited_count=valid_row.guests_count,
             is_matched_telegram_contact=False,
         )

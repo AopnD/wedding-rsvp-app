@@ -19,6 +19,7 @@ def main() -> None:
                 f"event_id={guest.event_id}, "
                 f"name={guest.full_name}, "
                 f"phone={guest.phone_number}, "
+                f"invite_code={guest.invite_code}, "
                 f"invited_count={guest.invited_count}, "
                 f"matched_telegram={guest.is_matched_telegram_contact}"
             )

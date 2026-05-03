@@ -21,6 +21,7 @@ def create_test_guest(db: Session) -> Guest:
         full_name="Test Guest",
         phone_number="+351900000000",
         telegram_username=None,
+        invite_code="test-invite-code",
         invited_count=2,
         is_matched_telegram_contact=False,
     )

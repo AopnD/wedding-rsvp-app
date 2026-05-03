@@ -1,5 +1,4 @@
-from datetime import datetime
-
+from datetime import datetime, UTC
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -21,6 +20,13 @@ class Guest(Base):
     phone_number: Mapped[str | None] = mapped_column(String(50), nullable=True)
     telegram_username: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
+    invite_code: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+
     invited_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 
     is_matched_telegram_contact: Mapped[bool] = mapped_column(
@@ -30,8 +36,8 @@ class Guest(Base):
     )
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime,
-        default=datetime.utcnow,
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
         nullable=False,
     )
 
