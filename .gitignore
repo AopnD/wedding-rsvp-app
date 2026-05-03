@@ -29,3 +29,7 @@ data/
 *.db
 *.sqlite
 *.sqlite3
+
+##snapshots & notes
+code_snapshot.txt
+some.txt

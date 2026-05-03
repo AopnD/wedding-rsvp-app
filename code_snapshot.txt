@@ -6,6 +6,269 @@
 
 ===== app\backend\api.py =====
 
+from __future__ import annotations
+
+import html
+import logging
+
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse
+
+from app.core.database import SessionLocal, create_database
+from app.services.rsvp_service import (
+    GuestInviteNotFoundError,
+    InvalidAttendingCountError,
+    InvalidRsvpResponseError,
+    get_guest_by_invite_code,
+    submit_rsvp_response,
+)
+
+
+logger = logging.getLogger(__name__)
+
+app = FastAPI(title="Local Wedding RSVP Server")
+
+
+@app.on_event("startup")
+def on_startup() -> None:
+    create_database()
+    logger.info("RSVP server started.")
+
+
+@app.get("/health")
+def health_check() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.get("/rsvp/{invite_code}", response_class=HTMLResponse)
+def show_rsvp_form(invite_code: str) -> HTMLResponse:
+    db = SessionLocal()
+
+    try:
+        guest = get_guest_by_invite_code(db=db, invite_code=invite_code)
+        event = guest.event
+
+        couple_names = html.escape(event.couple_names)
+        guest_name = html.escape(guest.full_name)
+        wedding_date = html.escape(event.wedding_date or "the wedding")
+        venue_name = html.escape(event.venue_name or "")
+        invite_code_escaped = html.escape(invite_code)
+
+        venue_html = ""
+        if venue_name:
+            venue_html = f"<p><strong>Venue:</strong> {venue_name}</p>"
+
+        html_content = f"""
+        <!doctype html>
+        <html lang="en">
+            <head>
+                <meta charset="utf-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1">
+                <title>Wedding RSVP</title>
+                <style>
+                    body {{
+                        font-family: Arial, sans-serif;
+                        max-width: 720px;
+                        margin: 40px auto;
+                        padding: 0 20px;
+                        line-height: 1.5;
+                        background: #f7f7f7;
+                    }}
+                    .card {{
+                        background: white;
+                        border: 1px solid #ddd;
+                        border-radius: 12px;
+                        padding: 24px;
+                    }}
+                    label {{
+                        display: block;
+                        margin-top: 16px;
+                        font-weight: bold;
+                    }}
+                    input, select, textarea, button {{
+                        width: 100%;
+                        padding: 10px;
+                        margin-top: 6px;
+                        font-size: 16px;
+                        box-sizing: border-box;
+                    }}
+                    button {{
+                        margin-top: 20px;
+                        cursor: pointer;
+                    }}
+                    .muted {{
+                        color: #666;
+                    }}
+                </style>
+            </head>
+            <body>
+                <div class="card">
+                    <h1>Wedding RSVP</h1>
+                    <p>Hello {guest_name},</p>
+                    <p>You are invited to the wedding of <strong>{couple_names}</strong>.</p>
+                    <p><strong>Date:</strong> {wedding_date}</p>
+                    {venue_html}
+
+                    <p class="muted">
+                        You can RSVP for up to {guest.invited_count} guest(s).
+                    </p>
+
+                    <form method="post" action="/rsvp/{invite_code_escaped}">
+                        <label for="response">Will you attend?</label>
+                        <select id="response" name="response" required>
+                            <option value="yes">Yes, I/we will attend</option>
+                            <option value="no">No, I/we cannot attend</option>
+                        </select>
+
+                        <label for="attending_count">How many people will attend?</label>
+                        <input
+                            id="attending_count"
+                            name="attending_count"
+                            type="number"
+                            min="0"
+                            max="{guest.invited_count}"
+                            value="{guest.invited_count}"
+                            required
+                        >
+
+                        <label for="notes">Notes / dietary requests</label>
+                        <textarea id="notes" name="notes" rows="4"></textarea>
+
+                        <button type="submit">Submit RSVP</button>
+                    </form>
+                </div>
+            </body>
+        </html>
+        """
+
+        return HTMLResponse(content=html_content)
+
+    except GuestInviteNotFoundError:
+        return HTMLResponse(
+            content=_simple_page(
+                title="RSVP link not found",
+                message="This RSVP link was not found. Please check the link and try again.",
+            ),
+            status_code=404,
+        )
+
+    except Exception:
+        logger.exception("Failed to show RSVP form.")
+        return HTMLResponse(
+            content=_simple_page(
+                title="Something went wrong",
+                message="Could not load this RSVP page.",
+            ),
+            status_code=500,
+        )
+
+    finally:
+        db.close()
+
+
+@app.post("/rsvp/{invite_code}", response_class=HTMLResponse)
+async def submit_rsvp_form(invite_code: str, request: Request) -> HTMLResponse:
+    form_data = await request.form()
+
+    response = str(form_data.get("response", ""))
+    notes = str(form_data.get("notes", ""))
+
+    try:
+        attending_count = int(str(form_data.get("attending_count", "0")))
+    except ValueError:
+        attending_count = -1
+
+    db = SessionLocal()
+
+    try:
+        result = submit_rsvp_response(
+            db=db,
+            invite_code=invite_code,
+            response=response,
+            attending_count=attending_count,
+            notes=notes,
+        )
+
+        message = (
+            f"Thank you, {html.escape(result.guest_name)}. "
+            f"Your RSVP was saved successfully."
+        )
+
+        return HTMLResponse(
+            content=_simple_page(
+                title="RSVP saved",
+                message=message,
+            )
+        )
+
+    except GuestInviteNotFoundError:
+        return HTMLResponse(
+            content=_simple_page(
+                title="RSVP link not found",
+                message="This RSVP link was not found. Please check the link and try again.",
+            ),
+            status_code=404,
+        )
+
+    except (InvalidRsvpResponseError, InvalidAttendingCountError) as exc:
+        return HTMLResponse(
+            content=_simple_page(
+                title="Invalid RSVP",
+                message=str(exc),
+            ),
+            status_code=400,
+        )
+
+    except Exception:
+        logger.exception("Failed to submit RSVP.")
+        return HTMLResponse(
+            content=_simple_page(
+                title="Something went wrong",
+                message="Could not save this RSVP response.",
+            ),
+            status_code=500,
+        )
+
+    finally:
+        db.close()
+
+
+def _simple_page(title: str, message: str) -> str:
+    safe_title = html.escape(title)
+    safe_message = html.escape(message)
+
+    return f"""
+    <!doctype html>
+    <html lang="en">
+        <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>{safe_title}</title>
+            <style>
+                body {{
+                    font-family: Arial, sans-serif;
+                    max-width: 720px;
+                    margin: 40px auto;
+                    padding: 0 20px;
+                    line-height: 1.5;
+                    background: #f7f7f7;
+                }}
+                .card {{
+                    background: white;
+                    border: 1px solid #ddd;
+                    border-radius: 12px;
+                    padding: 24px;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="card">
+                <h1>{safe_title}</h1>
+                <p>{safe_message}</p>
+            </div>
+        </body>
+    </html>
+    """
 
 
 ===== app\config\settings.py =====
@@ -557,8 +820,7 @@ class Event(Base):
 
 ===== app\models\guest.py =====
 
-from datetime import datetime
-
+from datetime import datetime, UTC
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -580,6 +842,13 @@ class Guest(Base):
     phone_number: Mapped[str | None] = mapped_column(String(50), nullable=True)
     telegram_username: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
+    invite_code: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+
     invited_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 
     is_matched_telegram_contact: Mapped[bool] = mapped_column(
@@ -589,8 +858,8 @@ class Guest(Base):
     )
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime,
-        default=datetime.utcnow,
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
         nullable=False,
     )
 
@@ -691,6 +960,63 @@ class Rsvp(Base):
 
 
 
+===== app\scripts\create_test_rsvp_link.py =====
+
+from __future__ import annotations
+
+from app.core.database import SessionLocal, create_database
+from app.models import Event, Guest
+from app.services.invite_code_service import generate_unique_invite_code
+
+
+def main() -> None:
+    create_database()
+
+    db = SessionLocal()
+
+    try:
+        event = Event(
+            couple_names="Omer & Dana",
+            wedding_date="2026-09-01",
+            venue_name="Example Venue",
+            venue_address="Example Address",
+        )
+
+        db.add(event)
+        db.commit()
+        db.refresh(event)
+
+        invite_code = generate_unique_invite_code(db)
+
+        guest = Guest(
+            event_id=event.id,
+            full_name="Test Guest",
+            phone_number="+351900000000",
+            telegram_username=None,
+            invite_code=invite_code,
+            invited_count=2,
+            is_matched_telegram_contact=False,
+        )
+
+        db.add(guest)
+        db.commit()
+        db.refresh(guest)
+
+        print("Test RSVP guest created.")
+        print(f"Guest ID: {guest.id}")
+        print(f"Guest name: {guest.full_name}")
+        print()
+        print("Open this link in your browser:")
+        print(f"http://127.0.0.1:8000/rsvp/{guest.invite_code}")
+
+    finally:
+        db.close()
+
+
+if __name__ == "__main__":
+    main()
+
+
 ===== app\scripts\init_db.py =====
 
 from app.core.database import create_database
@@ -730,6 +1056,7 @@ def create_test_guest(db: Session) -> Guest:
         full_name="Test Guest",
         phone_number="+351900000000",
         telegram_username=None,
+        invite_code="test-invite-code",
         invited_count=2,
         is_matched_telegram_contact=False,
     )
@@ -893,8 +1220,49 @@ def main() -> None:
                 f"event_id={guest.event_id}, "
                 f"name={guest.full_name}, "
                 f"phone={guest.phone_number}, "
+                f"invite_code={guest.invite_code}, "
                 f"invited_count={guest.invited_count}, "
                 f"matched_telegram={guest.is_matched_telegram_contact}"
+            )
+
+    finally:
+        db.close()
+
+
+if __name__ == "__main__":
+    main()
+
+
+===== app\scripts\test_list_rsvps.py =====
+
+from __future__ import annotations
+
+from app.core.database import SessionLocal
+from app.models import Guest, Rsvp
+
+
+def main() -> None:
+    db = SessionLocal()
+
+    try:
+        rsvps = (
+            db.query(Rsvp)
+            .join(Guest)
+            .order_by(Rsvp.submitted_at.desc())
+            .all()
+        )
+
+        print(f"Total RSVP responses: {len(rsvps)}")
+        print("-" * 50)
+
+        for rsvp in rsvps:
+            print(
+                f"id={rsvp.id}, "
+                f"guest={rsvp.guest.full_name}, "
+                f"response={rsvp.response}, "
+                f"attending_count={rsvp.attending_count}, "
+                f"notes={rsvp.notes}, "
+                f"submitted_at={rsvp.submitted_at}"
             )
 
     finally:
@@ -962,6 +1330,7 @@ from sqlalchemy.orm import Session
 from app.importers.guest_import_service import import_guest_file
 from app.importers.guest_validator import ValidGuestRow
 from app.models import Guest
+from app.services.invite_code_service import generate_unique_invite_code
 
 
 logger = logging.getLogger(__name__)
@@ -987,6 +1356,7 @@ def import_valid_guest_rows_to_database(
     - Only saves valid rows.
     - Skips phone numbers that already exist for the same event.
     - Prevents duplicate imports if the same file is imported twice.
+    - Creates one private invite code per saved guest.
     """
 
     existing_phone_numbers = {
@@ -1010,6 +1380,7 @@ def import_valid_guest_rows_to_database(
             full_name=valid_row.name,
             phone_number=valid_row.normalized_phone,
             telegram_username=None,
+            invite_code=generate_unique_invite_code(db),
             invited_count=valid_row.guests_count,
             is_matched_telegram_contact=False,
         )
@@ -1084,6 +1455,48 @@ def list_guests_for_event(db: Session, event_id: int) -> list[Guest]:
     )
 
 
+===== app\services\invite_code_service.py =====
+
+from __future__ import annotations
+
+import secrets
+
+from sqlalchemy.orm import Session
+
+from app.models import Guest
+
+
+def generate_invite_code() -> str:
+    """
+    Generate a public-safe invite code for RSVP links.
+
+    token_urlsafe creates URL-friendly text.
+    16 bytes gives enough randomness for the alpha version.
+    """
+
+    return secrets.token_urlsafe(16)
+
+
+def generate_unique_invite_code(db: Session) -> str:
+    """
+    Generate an invite code that does not already exist in the database.
+    """
+
+    for _ in range(10):
+        invite_code = generate_invite_code()
+
+        existing_guest = (
+            db.query(Guest)
+            .filter(Guest.invite_code == invite_code)
+            .first()
+        )
+
+        if existing_guest is None:
+            return invite_code
+
+    raise RuntimeError("Could not generate a unique invite code.")
+
+
 ===== app\services\reset_service.py =====
 
 from __future__ import annotations
@@ -1118,6 +1531,126 @@ def delete_all_local_data(db: Session) -> None:
 
 ===== app\services\rsvp_service.py =====
 
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+
+from sqlalchemy.orm import Session, joinedload
+
+from app.models import Guest, Rsvp
+
+
+logger = logging.getLogger(__name__)
+
+
+VALID_RSVP_RESPONSES = {"yes", "no"}
+
+
+class RsvpError(Exception):
+    """Base error for RSVP operations."""
+
+
+class GuestInviteNotFoundError(RsvpError):
+    """Raised when an invite code does not match any guest."""
+
+
+class InvalidRsvpResponseError(RsvpError):
+    """Raised when an RSVP response is invalid."""
+
+
+class InvalidAttendingCountError(RsvpError):
+    """Raised when attending count is invalid."""
+
+
+@dataclass(frozen=True)
+class RsvpSubmissionResult:
+    guest_id: int
+    guest_name: str
+    response: str
+    attending_count: int
+
+
+def get_guest_by_invite_code(db: Session, invite_code: str) -> Guest:
+    """
+    Find a guest by their public invite code.
+    """
+
+    guest = (
+        db.query(Guest)
+        .options(joinedload(Guest.event))
+        .filter(Guest.invite_code == invite_code)
+        .first()
+    )
+
+    if guest is None:
+        raise GuestInviteNotFoundError("RSVP invite link was not found.")
+
+    return guest
+
+
+def submit_rsvp_response(
+    db: Session,
+    invite_code: str,
+    response: str,
+    attending_count: int,
+    notes: str | None = None,
+) -> RsvpSubmissionResult:
+    """
+    Save a guest RSVP response.
+
+    Alpha behavior:
+    - Allows resubmission.
+    - Stores each submission as a new row.
+    - Later the dashboard can show the latest RSVP per guest.
+    """
+
+    cleaned_response = response.strip().lower()
+
+    if cleaned_response not in VALID_RSVP_RESPONSES:
+        raise InvalidRsvpResponseError("Response must be yes or no.")
+
+    guest = get_guest_by_invite_code(db=db, invite_code=invite_code)
+
+    if cleaned_response == "no":
+        final_attending_count = 0
+    else:
+        final_attending_count = attending_count
+
+    if final_attending_count < 0:
+        raise InvalidAttendingCountError("Attending count cannot be negative.")
+
+    if cleaned_response == "yes" and final_attending_count < 1:
+        raise InvalidAttendingCountError("Attending count must be at least 1.")
+
+    if final_attending_count > guest.invited_count:
+        raise InvalidAttendingCountError(
+            f"Attending count cannot be higher than invited count ({guest.invited_count})."
+        )
+
+    rsvp = Rsvp(
+        guest_id=guest.id,
+        response=cleaned_response,
+        attending_count=final_attending_count,
+        notes=notes.strip() if notes and notes.strip() else None,
+    )
+
+    db.add(rsvp)
+    db.commit()
+
+    logger.info(
+        "Saved RSVP response. guest_id=%s response=%s attending_count=%s",
+        guest.id,
+        cleaned_response,
+        final_attending_count,
+    )
+
+    return RsvpSubmissionResult(
+        guest_id=guest.id,
+        guest_name=guest.full_name,
+        response=cleaned_response,
+        attending_count=final_attending_count,
+    )
 
 
 ===== app\services\telegram_service.py =====
