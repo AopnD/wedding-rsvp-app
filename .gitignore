@@ -33,3 +33,7 @@ data/
 ##snapshots & notes
 code_snapshot.txt
 some.txt
+
+# Telegram local login sessions
+*.session
+*.session-journal

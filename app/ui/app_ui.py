@@ -13,6 +13,11 @@ from app.services.guest_import_db_service import import_valid_guest_rows_to_data
 from app.services.guest_query_service import list_guests_for_event
 from app.services.reset_service import delete_all_local_data
 
+from app.services.telegram_service import (
+    TelegramServiceError,
+    match_event_guests_with_telegram_contacts,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -110,22 +115,48 @@ def main(page: ft.Page) -> None:
         )
 
     def show_reset_dialog() -> None:
+        logger.warning("Reset dialog requested from UI.")
+
         def close_dialog() -> None:
-            dialog.open = False
-            page.update()
+            try:
+                if hasattr(page, "close"):
+                    page.close(dialog)
+                else:
+                    dialog.open = False
+                    page.update()
+            except Exception:
+                logger.exception("Failed to close reset dialog.")
 
         def on_confirm_reset(_: ft.ControlEvent) -> None:
+            logger.warning("Reset confirmed from UI.")
+
             db = SessionLocal()
 
             try:
-                delete_all_local_data(db)
+                result = delete_all_local_data(db)
                 state.clear_all()
+
+                logger.warning(
+                    "UI reset completed. events=%s guests=%s messages=%s rsvps=%s",
+                    result.deleted_events,
+                    result.deleted_guests,
+                    result.deleted_messages,
+                    result.deleted_rsvps,
+                )
+
                 close_dialog()
-                set_status("All local test data was deleted.")
                 render_setup_screen()
 
+                set_status(
+                    f"All local test data was deleted. "
+                    f"Deleted {result.deleted_events} events, "
+                    f"{result.deleted_guests} guests, "
+                    f"{result.deleted_messages} messages, "
+                    f"and {result.deleted_rsvps} RSVPs."
+                )
+
             except Exception:
-                logger.exception("Failed to delete local test data")
+                logger.exception("Failed to delete local test data from UI.")
                 close_dialog()
                 set_status("Something went wrong while deleting local test data.", is_error=True)
 
@@ -136,13 +167,13 @@ def main(page: ft.Page) -> None:
             modal=True,
             title=ft.Text("Delete local test data?"),
             content=ft.Text(
-                "This will delete all local events, guests, messages, and RSVPs "
-                "from the SQLite database. This is useful while testing the alpha app."
+                "This will permanently delete all local events, guests, messages, "
+                "and RSVP responses from the SQLite database."
             ),
             actions=[
                 ft.TextButton("Cancel", on_click=lambda _: close_dialog()),
                 ft.ElevatedButton(
-                    "Delete test data",
+                    "YES, DELETE ALL LOCAL DATA",
                     bgcolor=ft.Colors.RED_700,
                     color=ft.Colors.WHITE,
                     on_click=on_confirm_reset,
@@ -151,9 +182,17 @@ def main(page: ft.Page) -> None:
             actions_alignment=ft.MainAxisAlignment.END,
         )
 
-        page.dialog = dialog
-        dialog.open = True
-        page.update()
+        try:
+            if hasattr(page, "open"):
+                page.open(dialog)
+            else:
+                page.dialog = dialog
+                dialog.open = True
+                page.update()
+
+        except Exception:
+            logger.exception("Failed to open reset dialog.")
+            set_status("Could not open reset confirmation dialog.", is_error=True)
 
     def render_setup_screen() -> None:
         clear_page()
@@ -559,6 +598,39 @@ def main(page: ft.Page) -> None:
                 for guest in guest_preview_rows
             ],
         )
+        def on_match_telegram_contacts(_: ft.ControlEvent) -> None:
+            if state.event_id is None:
+                set_status("No event selected.", is_error=True)
+                return
+
+            db = SessionLocal()
+
+            try:
+                result = match_event_guests_with_telegram_contacts(
+                    db=db,
+                    event_id=state.event_id,
+                )
+
+                set_status(
+                    f"Telegram matching finished. "
+                    f"Matched {result.matched_count} of {result.total_guests} guests."
+                )
+
+                render_dashboard_screen()
+
+            except TelegramServiceError as exc:
+                logger.exception("Telegram matching failed")
+                set_status(str(exc), is_error=True)
+
+            except Exception:
+                logger.exception("Unexpected Telegram matching error")
+                set_status(
+                    "Something went wrong while matching Telegram contacts.",
+                    is_error=True,
+                )
+
+            finally:
+                db.close()
 
         preview_note = ""
         if len(guests) > PREVIEW_ROW_LIMIT:
@@ -593,6 +665,11 @@ def main(page: ft.Page) -> None:
                     ),
                     ft.Row(
                         controls=[
+                            ft.ElevatedButton(
+                                "Match Telegram contacts",
+                                on_click=on_match_telegram_contacts,
+                                disabled=not guests,
+                            ),
                             ft.ElevatedButton(
                                 "Upload another file",
                                 on_click=lambda _: render_upload_screen(),
