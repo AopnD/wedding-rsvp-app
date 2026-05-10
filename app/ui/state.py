@@ -24,6 +24,10 @@ class AppState:
         self.selected_file_path: Path | None = None
         self.validation_result: ValidationResult | None = None
 
+        # Chunk 8: remembered while the app is open.
+        # User pastes the Cloudflare tunnel URL here before sending invitations.
+        self.public_base_url: str | None = None
+
     def clear_import_state(self) -> None:
         self.selected_file_path = None
         self.validation_result = None
@@ -35,5 +39,7 @@ class AppState:
         self.wedding_date = None
         self.venue_name = None
         self.venue_address = None
+
+        self.public_base_url = None
 
         self.clear_import_state()

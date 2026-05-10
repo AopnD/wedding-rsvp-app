@@ -1,0 +1,6 @@
+- [ ] Start public RSVP tunnel via Ui
+- [ ] Change Ui look to be more comfortable
+- [ ] Make the Public RSVP tunnel url to appear in the click of a button\to be added in a click of a button instead of copy and paste it from the terminal.
+- [x] Move match telegram button from the bottom of the page next to the send buttons.
+- [ ] Make date\time of sent at, to present only hour and minutes.
+- [ ] Remove Telegram button from the bottom.
