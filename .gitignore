@@ -39,4 +39,4 @@ some.txt
 *.session-journal
 
 # test files:
-sample_guests
+sample_guests.csv
