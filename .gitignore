@@ -38,3 +38,5 @@ some.txt
 *.session
 *.session-journal
 
+# test files:
+sample_guests
