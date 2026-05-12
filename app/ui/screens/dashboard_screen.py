@@ -22,7 +22,14 @@ from app.services.telegram_service import (
 from app.ui.context import AppContext
 from app.ui.dialogs import show_reset_dialog
 from app.ui.layout import clear_page, section_card, table_container
-
+from app.services.dashboard_summary_service import (
+    DashboardSummary,
+    get_dashboard_summary,
+)
+from app.services.rsvp_query_service import (
+    GuestRsvpStatus,
+    list_latest_rsvps_for_event,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +61,18 @@ def render_dashboard_screen(context: AppContext) -> None:
         logger.info("Loading dashboard guests. event_id=%s", state.event_id)
 
         guests = list_guests_for_event(db=db, event_id=state.event_id)
+
+        dashboard_summary = get_dashboard_summary(
+            db=db,
+            event_id=state.event_id,
+        )
+
         message_summary = get_message_status_summary(
+            db=db,
+            event_id=state.event_id,
+        )
+
+        rsvp_statuses = list_latest_rsvps_for_event(
             db=db,
             event_id=state.event_id,
         )
@@ -69,6 +87,19 @@ def render_dashboard_screen(context: AppContext) -> None:
         logger.exception("Failed to load dashboard guests.")
         status.show_error("Something went wrong while loading guests.")
         guests = []
+        rsvp_statuses = []
+
+        dashboard_summary = DashboardSummary(
+            total_guests=0,
+            sendable=0,
+            sent=0,
+            failed=0,
+            responded=0,
+            attending=0,
+            not_attending=0,
+            total_attending_guests=0,
+        )
+
         message_summary = MessageStatusSummary(
             total_guests=0,
             telegram_matched=0,
@@ -84,6 +115,7 @@ def render_dashboard_screen(context: AppContext) -> None:
 
     guest_preview_rows = guests[:PREVIEW_ROW_LIMIT]
     message_status_preview_rows = message_summary.statuses[:PREVIEW_ROW_LIMIT]
+    rsvp_preview_rows = rsvp_statuses[:PREVIEW_ROW_LIMIT]
 
     guests_table = ft.DataTable(
         columns=[
@@ -134,6 +166,32 @@ def render_dashboard_screen(context: AppContext) -> None:
             for row in message_status_preview_rows
         ],
     )
+
+    rsvp_status_table = ft.DataTable(
+        columns=[
+            ft.DataColumn(ft.Text("Guest")),
+            ft.DataColumn(ft.Text("Phone")),
+            ft.DataColumn(ft.Text("Response")),
+            ft.DataColumn(ft.Text("Attending count")),
+            ft.DataColumn(ft.Text("Notes")),
+            ft.DataColumn(ft.Text("Submitted at")),
+        ],
+        rows=[
+            ft.DataRow(
+                cells=[
+                    ft.DataCell(ft.Text(row.guest_name)),
+                    ft.DataCell(ft.Text(row.phone_number or "")),
+                    ft.DataCell(ft.Text(_format_rsvp_response(row.response))),
+                    ft.DataCell(ft.Text(str(row.attending_count))),
+                    ft.DataCell(ft.Text(row.notes or "")),
+                    ft.DataCell(ft.Text(str(row.submitted_at))),
+                ]
+            )
+            for row in rsvp_preview_rows
+        ],
+    )
+
+
 
     public_base_url_field = ft.TextField(
         label="Public RSVP base URL",
@@ -311,6 +369,10 @@ def render_dashboard_screen(context: AppContext) -> None:
             f" Showing first {PREVIEW_ROW_LIMIT} message statuses only."
         )
 
+    rsvp_preview_note = ""
+    if len(rsvp_statuses) > PREVIEW_ROW_LIMIT:
+        rsvp_preview_note = f" Showing first {PREVIEW_ROW_LIMIT} RSVP responses only."
+
     page.add(
         ft.Column(
             controls=[
@@ -320,6 +382,74 @@ def render_dashboard_screen(context: AppContext) -> None:
                     [
                         ft.Text(f"Couple names: {state.couple_names or 'Unknown'}"),
                         ft.Text(f"Imported guests: {len(guests)}"),
+                    ],
+                ),
+                section_card(
+                    "Progress summary",
+                    [
+                        ft.Row(
+                            controls=[
+                                _dashboard_metric_card(
+                                    "Total guests",
+                                    dashboard_summary.total_guests,
+                                    "Imported guest rows",
+                                ),
+                                _dashboard_metric_card(
+                                    "Sendable",
+                                    dashboard_summary.sendable,
+                                    "Matched and not sent",
+                                ),
+                                _dashboard_metric_card(
+                                    "Sent",
+                                    dashboard_summary.sent,
+                                    "Invitations sent",
+                                ),
+                                _dashboard_metric_card(
+                                    "Failed",
+                                    dashboard_summary.failed,
+                                    "Latest send failed",
+                                ),
+                            ],
+                            spacing=12,
+                        ),
+                        ft.Row(
+                            controls=[
+                                _dashboard_metric_card(
+                                    "Responded",
+                                    dashboard_summary.responded,
+                                    "Guests with RSVP",
+                                ),
+                                _dashboard_metric_card(
+                                    "Attending",
+                                    dashboard_summary.attending,
+                                    "Latest RSVP is yes",
+                                ),
+                                _dashboard_metric_card(
+                                    "Not attending",
+                                    dashboard_summary.not_attending,
+                                    "Latest RSVP is no",
+                                ),
+                                _dashboard_metric_card(
+                                    "Total attending guests",
+                                    dashboard_summary.total_attending_guests,
+                                    "Including +1s/family count",
+                                ),
+                            ],
+                            spacing=12,
+                        ),
+                    ],
+                ),
+                section_card(
+                    "RSVP responses",
+                    [
+                        ft.Text(
+                            "No RSVP responses yet."
+                            if not rsvp_statuses
+                            else f"Latest RSVP response per guest.{rsvp_preview_note}"
+                        ),
+                        table_container(rsvp_status_table, height=320)
+                        if rsvp_statuses
+                        else ft.Container(),
                     ],
                 ),
                 section_card(
@@ -558,6 +688,47 @@ def show_send_confirmation_dialog(
     except Exception:
         logger.exception("Failed to open send confirmation dialog.")
         status.show_error("Could not open send confirmation dialog.")
+
+
+def _dashboard_metric_card(
+    label: str,
+    value: int,
+    helper_text: str | None = None,
+) -> ft.Container:
+    controls: list[ft.Control] = [
+        ft.Text(label, size=13, color=ft.Colors.GREY_700),
+        ft.Text(str(value), size=28, weight=ft.FontWeight.BOLD),
+    ]
+
+    if helper_text:
+        controls.append(
+            ft.Text(
+                helper_text,
+                size=12,
+                color=ft.Colors.GREY_600,
+            )
+        )
+
+    return ft.Container(
+        content=ft.Column(
+            controls=controls,
+            spacing=4,
+        ),
+        width=220,
+        padding=14,
+        border=ft.border.all(1, ft.Colors.GREY_300),
+        border_radius=12,
+        bgcolor=ft.Colors.WHITE,
+    )
+
+def _format_rsvp_response(response: str) -> str:
+    if response == "yes":
+        return "Yes"
+
+    if response == "no":
+        return "No"
+
+    return response
 
 def _build_send_help_text(ready_to_send_count: int) -> str:
     if ready_to_send_count > 0:
