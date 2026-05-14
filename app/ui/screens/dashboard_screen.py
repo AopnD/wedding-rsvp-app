@@ -26,10 +26,7 @@ from app.services.dashboard_summary_service import (
     DashboardSummary,
     get_dashboard_summary,
 )
-from app.services.rsvp_query_service import (
-    GuestRsvpStatus,
-    list_latest_rsvps_for_event,
-)
+from app.services.rsvp_query_service import list_latest_rsvps_for_event
 
 logger = logging.getLogger(__name__)
 
@@ -529,11 +526,6 @@ def render_dashboard_screen(context: AppContext) -> None:
                         ft.ElevatedButton(
                             "Refresh dashboard",
                             on_click=lambda _: render_dashboard_screen(context),
-                        ),
-                        ft.ElevatedButton(
-                            "Match Telegram contacts",
-                            on_click=on_match_telegram_contacts,
-                            disabled=not guests,
                         ),
                         ft.ElevatedButton(
                             "Upload another file",

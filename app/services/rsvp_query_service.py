@@ -5,7 +5,10 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session, joinedload
 
-from app.models import Guest, Rsvp
+from app.models import Guest
+
+from app.services.status_helpers import get_latest_rsvp
+
 
 
 @dataclass(frozen=True)
@@ -42,7 +45,7 @@ def list_latest_rsvps_for_event(
     results: list[GuestRsvpStatus] = []
 
     for guest in guests:
-        latest_rsvp = _get_latest_rsvp(guest.rsvps)
+        latest_rsvp = get_latest_rsvp(guest.rsvps)
 
         if latest_rsvp is None:
             continue
@@ -62,8 +65,3 @@ def list_latest_rsvps_for_event(
     return results
 
 
-def _get_latest_rsvp(rsvps: list[Rsvp]) -> Rsvp | None:
-    if not rsvps:
-        return None
-
-    return max(rsvps, key=lambda rsvp: rsvp.id)

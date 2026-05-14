@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+
+from app.services.status_helpers import (
+    get_latest_message,
+    get_latest_rsvp,
+    get_latest_sent_message,
+)
 
 from sqlalchemy.orm import Session, joinedload
 
-from app.models import Guest, Message, Rsvp
+from app.models import Guest
 
 
 @dataclass(frozen=True)
@@ -59,8 +64,8 @@ def get_dashboard_summary(
     total_attending_guests = 0
 
     for guest in guests:
-        sent_message = _get_latest_sent_message(guest.messages)
-        latest_message = _get_latest_message(guest.messages)
+        sent_message = get_latest_sent_message(guest.messages)
+        latest_message = get_latest_message(guest.messages)
 
         if sent_message is not None:
             sent_count += 1
@@ -69,7 +74,7 @@ def get_dashboard_summary(
         elif guest.is_matched_telegram_contact:
             sendable_count += 1
 
-        latest_rsvp = _get_latest_rsvp(guest.rsvps)
+        latest_rsvp = get_latest_rsvp(guest.rsvps)
 
         if latest_rsvp is None:
             continue
@@ -94,28 +99,3 @@ def get_dashboard_summary(
     )
 
 
-def _get_latest_message(messages: list[Message]) -> Message | None:
-    if not messages:
-        return None
-
-    return max(messages, key=lambda message: message.id)
-
-
-def _get_latest_sent_message(messages: list[Message]) -> Message | None:
-    sent_messages = [
-        message
-        for message in messages
-        if message.status == "sent"
-    ]
-
-    if not sent_messages:
-        return None
-
-    return max(sent_messages, key=lambda message: message.id)
-
-
-def _get_latest_rsvp(rsvps: list[Rsvp]) -> Rsvp | None:
-    if not rsvps:
-        return None
-
-    return max(rsvps, key=lambda rsvp: rsvp.id)

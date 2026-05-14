@@ -5,7 +5,12 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session, joinedload
 
-from app.models import Guest, Message
+from app.models import Guest
+
+from app.services.status_helpers import (
+    get_latest_message,
+    get_latest_sent_message,
+)
 
 
 @dataclass(frozen=True)
@@ -66,8 +71,8 @@ def get_message_status_summary(
         else:
             not_matched_count += 1
 
-        latest_message = _get_latest_message(guest.messages)
-        sent_message = _get_latest_sent_message(guest.messages)
+        latest_message = get_latest_message(guest.messages)
+        sent_message = get_latest_sent_message(guest.messages)
 
         if sent_message is not None:
             status = "sent"
@@ -114,22 +119,3 @@ def get_message_status_summary(
         statuses=statuses,
     )
 
-
-def _get_latest_message(messages: list[Message]) -> Message | None:
-    if not messages:
-        return None
-
-    return max(messages, key=lambda message: message.id)
-
-
-def _get_latest_sent_message(messages: list[Message]) -> Message | None:
-    sent_messages = [
-        message
-        for message in messages
-        if message.status == "sent"
-    ]
-
-    if not sent_messages:
-        return None
-
-    return max(sent_messages, key=lambda message: message.id)
