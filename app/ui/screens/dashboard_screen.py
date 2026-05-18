@@ -117,6 +117,25 @@ def render_dashboard_screen(context: AppContext) -> None:
     if runtime_status.public_base_url:
         state.public_base_url = runtime_status.public_base_url
 
+    if state.rsvp_runtime_indicator_status != "failed":
+        if state.public_base_url and runtime_status.server_running and runtime_status.tunnel_running:
+            state.rsvp_runtime_indicator_status = "live"
+            state.rsvp_runtime_indicator_message = "Public RSVP link is live."
+        elif state.public_base_url and (
+            not runtime_status.server_running or not runtime_status.tunnel_running
+        ):
+            state.rsvp_runtime_indicator_status = "warning"
+            state.rsvp_runtime_indicator_message = (
+                "The public RSVP link was started, but the server or tunnel "
+                "does not look healthy. Check data/logs/app.log."
+            )
+            logger.warning(
+                "RSVP runtime warning. server_running=%s tunnel_running=%s public_url=%s",
+                runtime_status.server_running,
+                runtime_status.tunnel_running,
+                state.public_base_url,
+            )
+
     guest_preview_rows = guests[:PREVIEW_ROW_LIMIT]
     message_status_preview_rows = message_summary.statuses[:PREVIEW_ROW_LIMIT]
     rsvp_preview_rows = rsvp_statuses[:PREVIEW_ROW_LIMIT]
@@ -234,6 +253,8 @@ def render_dashboard_screen(context: AppContext) -> None:
 
             public_base_url = context.runtime.start_public_tunnel_if_needed()
             state.public_base_url = public_base_url
+            state.rsvp_runtime_indicator_status = "live"
+            state.rsvp_runtime_indicator_message = "Public RSVP link is live."
 
             logger.info("Public RSVP link ready: %s", public_base_url)
 
@@ -242,11 +263,20 @@ def render_dashboard_screen(context: AppContext) -> None:
 
         except RsvpRuntimeError as exc:
             logger.exception("Failed to start public RSVP link.")
+            state.rsvp_runtime_indicator_status = "failed"
+            state.rsvp_runtime_indicator_message = str(exc)
             status.show_error(str(exc))
+            render_dashboard_screen(context)
+
 
         except Exception:
             logger.exception("Unexpected error while starting public RSVP link.")
+            state.rsvp_runtime_indicator_status = "failed"
+            state.rsvp_runtime_indicator_message = (
+                "Something went wrong while starting the public RSVP link."
+            )
             status.show_error("Something went wrong while starting the public RSVP link.")
+            render_dashboard_screen(context)
 
     def on_preview_invitation(_: ft.ControlEvent) -> None:
         logger.info("Invitation preview button clicked.")
@@ -395,7 +425,23 @@ def render_dashboard_screen(context: AppContext) -> None:
     page.add(
         ft.Column(
             controls=[
-                ft.Text("Dashboard", size=32, weight=ft.FontWeight.BOLD),
+                ft.Row(
+                    controls=[
+                        ft.Text(
+                            "Dashboard",
+                            size=32,
+                            weight=ft.FontWeight.BOLD,
+                            expand=True,
+                        ),
+                        _runtime_status_light(
+                            indicator_status=state.rsvp_runtime_indicator_status,
+                            message=state.rsvp_runtime_indicator_message,
+                            public_base_url=state.public_base_url,
+                        ),
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
                 section_card(
                     "Current event",
                     [
@@ -458,40 +504,42 @@ def render_dashboard_screen(context: AppContext) -> None:
                         ),
                     ],
                 ),
-                section_card(
-                    "RSVP server and public link",
-                    [
-                        ft.Text(
-                            "The local RSVP server runs on your computer. "
-                            "The public link lets guests open their personal RSVP pages."
-                        ),
-                        ft.Text(
-                            f"Local RSVP server: "
-                            f"{'Running' if runtime_status.server_running else 'Not running'}"
-                        ),
-                        ft.Text(f"Local address: {runtime_status.local_base_url}"),
-                        ft.Text(
-                            "Public RSVP link: "
-                            + (
-                                state.public_base_url
-                                if state.public_base_url
-                                else "Not started yet"
+                (
+                    section_card(
+                        "RSVP server and public link",
+                        [
+                            ft.Text(
+                                "The local RSVP server runs on your computer. "
+                                "The public link lets guests open their personal RSVP pages."
                             ),
-                            selectable=True,
-                        ),
-                        ft.Row(
-                            controls=[
-                                ft.ElevatedButton(
-                                    "Public RSVP link is running"
+                            ft.Text(
+                                f"Local RSVP server: "
+                                f"{'Running' if runtime_status.server_running else 'Not running'}"
+                            ),
+                            ft.Text(f"Local address: {runtime_status.local_base_url}"),
+                            ft.Text(
+                                "Public RSVP link: "
+                                + (
+                                    state.public_base_url
                                     if state.public_base_url
-                                    else "Start public RSVP link",
-                                    on_click=on_start_public_rsvp_link,
-                                    disabled=not guests or bool(state.public_base_url),
+                                    else "Not started yet"
                                 ),
-                            ],
-                            spacing=12,
-                        ),
-                    ],
+                                selectable=True,
+                            ),
+                            ft.Row(
+                                controls=[
+                                    ft.ElevatedButton(
+                                        "Start public RSVP link",
+                                        on_click=on_start_public_rsvp_link,
+                                        disabled=not guests,
+                                    ),
+                                ],
+                                spacing=12,
+                            ),
+                        ],
+                    )
+                    if state.rsvp_runtime_indicator_status == "not_started"
+                    else ft.Container()
                 ),
                 section_card(
                     "RSVP responses",
@@ -735,6 +783,67 @@ def show_send_confirmation_dialog(
     except Exception:
         logger.exception("Failed to open send confirmation dialog.")
         status.show_error("Could not open send confirmation dialog.")
+
+
+def _runtime_status_light(
+    indicator_status: str,
+    message: str | None,
+    public_base_url: str | None,
+) -> ft.Container:
+    if indicator_status == "live":
+        color = ft.Colors.GREEN_600
+        label = "RSVP live"
+        helper = public_base_url or message or "Server and tunnel are running."
+
+    elif indicator_status == "warning":
+        color = ft.Colors.AMBER_600
+        label = "RSVP warning"
+        helper = message or "There may be an issue with the server or tunnel."
+
+    elif indicator_status == "failed":
+        color = ft.Colors.RED_600
+        label = "RSVP failed"
+        helper = message or "Could not start the public RSVP link."
+
+    else:
+        color = ft.Colors.GREY_400
+        label = "RSVP not live"
+        helper = "Public RSVP link has not been started yet."
+
+    return ft.Container(
+        content=ft.Row(
+            controls=[
+                ft.Container(
+                    width=14,
+                    height=14,
+                    border_radius=7,
+                    bgcolor=color,
+                    animate_opacity=ft.Animation(1200, ft.AnimationCurve.EASE_IN_OUT),
+                    opacity=0.85,
+                ),
+                ft.Column(
+                    controls=[
+                        ft.Text(label, weight=ft.FontWeight.BOLD),
+                        ft.Text(
+                            helper,
+                            size=12,
+                            color=ft.Colors.GREY_700,
+                            selectable=bool(public_base_url),
+                        ),
+                    ],
+                    spacing=2,
+                    tight=True,
+                ),
+            ],
+            spacing=8,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        ),
+        padding=10,
+        border=ft.border.all(1, ft.Colors.GREY_300),
+        border_radius=20,
+        bgcolor=ft.Colors.WHITE,
+    )
+
 
 
 def _dashboard_metric_card(
