@@ -140,56 +140,6 @@ def render_dashboard_screen(context: AppContext) -> None:
     message_status_preview_rows = message_summary.statuses[:PREVIEW_ROW_LIMIT]
     rsvp_preview_rows = rsvp_statuses[:PREVIEW_ROW_LIMIT]
 
-    guests_table = ft.DataTable(
-        columns=[
-            ft.DataColumn(ft.Text("ID")),
-            ft.DataColumn(ft.Text("Name")),
-            ft.DataColumn(ft.Text("Phone")),
-            ft.DataColumn(ft.Text("Invited count")),
-            ft.DataColumn(ft.Text("Telegram matched")),
-        ],
-        rows=[
-            ft.DataRow(
-                cells=[
-                    ft.DataCell(ft.Text(str(guest.id))),
-                    ft.DataCell(ft.Text(guest.full_name)),
-                    ft.DataCell(ft.Text(guest.phone_number or "")),
-                    ft.DataCell(ft.Text(str(guest.invited_count))),
-                    ft.DataCell(
-                        ft.Text(
-                            "Yes" if guest.is_matched_telegram_contact else "No"
-                        )
-                    ),
-                ]
-            )
-            for guest in guest_preview_rows
-        ],
-    )
-
-    message_status_table = ft.DataTable(
-        columns=[
-            ft.DataColumn(ft.Text("Guest")),
-            ft.DataColumn(ft.Text("Phone")),
-            ft.DataColumn(ft.Text("Telegram")),
-            ft.DataColumn(ft.Text("Status")),
-            ft.DataColumn(ft.Text("Sent at")),
-            ft.DataColumn(ft.Text("Error")),
-        ],
-        rows=[
-            ft.DataRow(
-                cells=[
-                    ft.DataCell(ft.Text(row.guest_name)),
-                    ft.DataCell(ft.Text(row.phone_number or "")),
-                    ft.DataCell(ft.Text("Yes" if row.telegram_matched else "No")),
-                    ft.DataCell(ft.Text(row.status)),
-                    ft.DataCell(ft.Text(str(row.sent_at) if row.sent_at else "")),
-                    ft.DataCell(ft.Text(row.error_message or "")),
-                ]
-            )
-            for row in message_status_preview_rows
-        ],
-    )
-
     rsvp_status_table = ft.DataTable(
         columns=[
             ft.DataColumn(ft.Text("Guest")),
@@ -408,6 +358,124 @@ def render_dashboard_screen(context: AppContext) -> None:
         finally:
             db.close()
 
+    def on_open_guests_dialog(_: ft.ControlEvent) -> None:
+        logger.info("Guest list dialog opened.")
+
+        dialog_guests_table = ft.DataTable(
+            columns=[
+                ft.DataColumn(ft.Text("ID")),
+                ft.DataColumn(ft.Text("Name")),
+                ft.DataColumn(ft.Text("Phone")),
+                ft.DataColumn(ft.Text("Invited count")),
+                ft.DataColumn(ft.Text("Telegram matched")),
+            ],
+            rows=[
+                ft.DataRow(
+                    cells=[
+                        ft.DataCell(ft.Text(str(guest.id))),
+                        ft.DataCell(ft.Text(guest.full_name)),
+                        ft.DataCell(ft.Text(guest.phone_number or "")),
+                        ft.DataCell(ft.Text(str(guest.invited_count))),
+                        ft.DataCell(
+                            ft.Text(
+                                "Yes" if guest.is_matched_telegram_contact else "No"
+                            )
+                        ),
+                    ]
+                )
+                for guest in guest_preview_rows
+            ],
+        )
+
+        dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Guests"),
+            content=ft.Container(
+                content=ft.Column(
+                    controls=[
+                        ft.Text(
+                            "No guests imported yet."
+                            if not guests
+                            else f"Imported guest preview.{guest_preview_note}"
+                        ),
+                        table_container(dialog_guests_table, height=420)
+                        if guests
+                        else ft.Container(),
+                    ],
+                    spacing=12,
+                    tight=True,
+                ),
+                width=900,
+            ),
+            actions=[
+                ft.TextButton("Close", on_click=lambda _: _close_dialog(page, dialog)),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+
+        _open_dialog(page, dialog)
+
+    def on_open_invitation_status_dialog(_: ft.ControlEvent) -> None:
+        logger.info("Invitation status dialog opened.")
+
+        dialog_message_status_table = ft.DataTable(
+            columns=[
+                ft.DataColumn(ft.Text("Guest")),
+                ft.DataColumn(ft.Text("Phone")),
+                ft.DataColumn(ft.Text("Telegram")),
+                ft.DataColumn(ft.Text("Status")),
+                ft.DataColumn(ft.Text("Sent at")),
+                ft.DataColumn(ft.Text("Error")),
+            ],
+            rows=[
+                ft.DataRow(
+                    cells=[
+                        ft.DataCell(ft.Text(row.guest_name)),
+                        ft.DataCell(ft.Text(row.phone_number or "")),
+                        ft.DataCell(ft.Text("Yes" if row.telegram_matched else "No")),
+                        ft.DataCell(ft.Text(row.status)),
+                        ft.DataCell(ft.Text(str(row.sent_at) if row.sent_at else "")),
+                        ft.DataCell(ft.Text(row.error_message or "")),
+                    ]
+                )
+                for row in message_status_preview_rows
+            ],
+        )
+
+        dialog = ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Invitation status"),
+            content=ft.Container(
+                content=ft.Column(
+                    controls=[
+                        ft.Text(f"Total guests: {message_summary.total_guests}"),
+                        ft.Text(f"Telegram matched: {message_summary.telegram_matched}"),
+                        ft.Text(f"Ready to send: {message_summary.ready_to_send}"),
+                        ft.Text(f"Sent: {message_summary.sent}"),
+                        ft.Text(f"Failed: {message_summary.failed}"),
+                        ft.Text(f"Not matched: {message_summary.not_matched}"),
+                        ft.Text(
+                            "No message statuses yet."
+                            if not message_summary.statuses
+                            else f"Message status preview.{message_status_preview_note}"
+                        ),
+                        table_container(dialog_message_status_table, height=420)
+                        if message_summary.statuses
+                        else ft.Container(),
+                    ],
+                    spacing=8,
+                    tight=True,
+                ),
+                width=950,
+            ),
+            actions=[
+                ft.TextButton("Close", on_click=lambda _: _close_dialog(page, dialog)),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END,
+        )
+
+        _open_dialog(page, dialog)
+
     guest_preview_note = ""
     if len(guests) > PREVIEW_ROW_LIMIT:
         guest_preview_note = f" Showing first {PREVIEW_ROW_LIMIT} guests only."
@@ -442,12 +510,57 @@ def render_dashboard_screen(context: AppContext) -> None:
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
-                section_card(
-                    "Current event",
-                    [
-                        ft.Text(f"Couple names: {state.couple_names or 'Unknown'}"),
-                        ft.Text(f"Imported guests: {len(guests)}"),
+                ft.Row(
+                    controls=[
+                        ft.Container(
+                            content=section_card(
+                                "Current event",
+                                [
+                                    ft.Text(f"Couple names: {state.couple_names or 'Unknown'}"),
+                                    ft.Text(f"Imported guests: {len(guests)}"),
+                                ],
+                            ),
+                            width=260,
+                        ),
+                        ft.Container(
+                            content=ft.Column(
+                                controls=[
+                                    ft.Text(
+                                        "Quick views",
+                                        size=20,
+                                        weight=ft.FontWeight.BOLD,
+                                    ),
+                                    ft.Text(
+                                        "Open detailed tables without cluttering the dashboard.",
+                                        color=ft.Colors.GREY_700,
+                                    ),
+                                    ft.Row(
+                                        controls=[
+                                            ft.ElevatedButton(
+                                                "Guest list",
+                                                on_click=on_open_guests_dialog,
+                                                disabled=not guests,
+                                            ),
+                                            ft.ElevatedButton(
+                                                "Invitation status",
+                                                on_click=on_open_invitation_status_dialog,
+                                                disabled=not guests,
+                                            ),
+                                        ],
+                                        spacing=12,
+                                    ),
+                                ],
+                                spacing=12,
+                            ),
+                            padding=18,
+                            border=ft.border.all(1, ft.Colors.GREY_300),
+                            border_radius=12,
+                            bgcolor=ft.Colors.WHITE,
+                            width=360,
+                        ),
                     ],
+                    spacing=16,
+                    vertical_alignment=ft.CrossAxisAlignment.START,
                 ),
                 section_card(
                     "Progress summary",
@@ -555,19 +668,6 @@ def render_dashboard_screen(context: AppContext) -> None:
                     ],
                 ),
                 section_card(
-                    "Guests",
-                    [
-                        ft.Text(
-                            "No guests imported yet."
-                            if not guests
-                            else f"Imported guest preview.{guest_preview_note}"
-                        ),
-                        table_container(guests_table, height=360)
-                        if guests
-                        else ft.Container(),
-                    ],
-                ),
-                section_card(
                     "Invitation sending",
                     [
                         ft.Text(
@@ -607,25 +707,6 @@ def render_dashboard_screen(context: AppContext) -> None:
                             bgcolor=ft.Colors.GREY_100,
                             width=760,
                         ),
-                    ],
-                ),
-                section_card(
-                    "Invitation status",
-                    [
-                        ft.Text(f"Total guests: {message_summary.total_guests}"),
-                        ft.Text(f"Telegram matched: {message_summary.telegram_matched}"),
-                        ft.Text(f"Ready to send: {message_summary.ready_to_send}"),
-                        ft.Text(f"Sent: {message_summary.sent}"),
-                        ft.Text(f"Failed: {message_summary.failed}"),
-                        ft.Text(f"Not matched: {message_summary.not_matched}"),
-                        ft.Text(
-                            "No message statuses yet."
-                            if not message_summary.statuses
-                            else f"Message status preview.{message_status_preview_note}"
-                        ),
-                        table_container(message_status_table, height=320)
-                        if message_summary.statuses
-                        else ft.Container(),
                     ],
                 ),
                 ft.Row(
@@ -783,6 +864,34 @@ def show_send_confirmation_dialog(
     except Exception:
         logger.exception("Failed to open send confirmation dialog.")
         status.show_error("Could not open send confirmation dialog.")
+
+
+
+
+def _open_dialog(page: ft.Page, dialog: ft.AlertDialog) -> None:
+    try:
+        if hasattr(page, "open"):
+            page.open(dialog)
+        else:
+            page.dialog = dialog
+            dialog.open = True
+            page.update()
+
+    except Exception:
+        logger.exception("Failed to open dashboard dialog.")
+
+
+def _close_dialog(page: ft.Page, dialog: ft.AlertDialog) -> None:
+    try:
+        if hasattr(page, "close"):
+            page.close(dialog)
+        else:
+            dialog.open = False
+            page.update()
+
+    except Exception:
+        logger.exception("Failed to close dashboard dialog.")
+
 
 
 def _runtime_status_light(
