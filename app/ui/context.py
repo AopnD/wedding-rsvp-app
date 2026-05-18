@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import flet as ft
 
+from app.services.rsvp_runtime_service import RsvpRuntimeManager
 from app.ui.state import AppState
 from app.ui.status import StatusController
 
@@ -20,3 +21,4 @@ class AppContext:
     page: ft.Page
     state: AppState
     status: StatusController
+    runtime: RsvpRuntimeManager

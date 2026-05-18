@@ -24,8 +24,8 @@ class AppState:
         self.selected_file_path: Path | None = None
         self.validation_result: ValidationResult | None = None
 
-        # Chunk 8: remembered while the app is open.
-        # User pastes the Cloudflare tunnel URL here before sending invitations.
+        # Remembered while the app is open.
+        # Set automatically when the app starts the public Cloudflare tunnel.
         self.public_base_url: str | None = None
 
     def clear_import_state(self) -> None:

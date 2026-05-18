@@ -5,6 +5,10 @@ import logging
 import flet as ft
 
 from app.core.database import SessionLocal
+from app.services.dashboard_summary_service import (
+    DashboardSummary,
+    get_dashboard_summary,
+)
 from app.services.guest_query_service import list_guests_for_event
 from app.services.invitation_send_service import (
     InvitationSendError,
@@ -15,6 +19,8 @@ from app.services.message_status_service import (
     MessageStatusSummary,
     get_message_status_summary,
 )
+from app.services.rsvp_query_service import list_latest_rsvps_for_event
+from app.services.rsvp_runtime_service import RsvpRuntimeError
 from app.services.telegram_service import (
     TelegramServiceError,
     match_event_guests_with_telegram_contacts,
@@ -22,11 +28,7 @@ from app.services.telegram_service import (
 from app.ui.context import AppContext
 from app.ui.dialogs import show_reset_dialog
 from app.ui.layout import clear_page, section_card, table_container
-from app.services.dashboard_summary_service import (
-    DashboardSummary,
-    get_dashboard_summary,
-)
-from app.services.rsvp_query_service import list_latest_rsvps_for_event
+
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +112,11 @@ def render_dashboard_screen(context: AppContext) -> None:
     finally:
         db.close()
 
+    runtime_status = context.runtime.get_status()
+
+    if runtime_status.public_base_url:
+        state.public_base_url = runtime_status.public_base_url
+
     guest_preview_rows = guests[:PREVIEW_ROW_LIMIT]
     message_status_preview_rows = message_summary.statuses[:PREVIEW_ROW_LIMIT]
     rsvp_preview_rows = rsvp_statuses[:PREVIEW_ROW_LIMIT]
@@ -188,43 +195,58 @@ def render_dashboard_screen(context: AppContext) -> None:
         ],
     )
 
-
-
-    public_base_url_field = ft.TextField(
-        label="Public RSVP base URL",
-        hint_text="Example: https://something.trycloudflare.com",
-        width=620,
-        value=state.public_base_url or "",
-    )
-
     invitation_preview_text = ft.Text(
-        "No preview yet. Paste the public RSVP URL and click Preview invitation.",
+        "No preview yet. Start the public RSVP link, then click Preview invitation.",
         selectable=True,
         color=ft.Colors.GREY_700,
     )
 
     send_help_text = ft.Text(
-        _build_send_help_text(message_summary.ready_to_send),
+        _build_send_help_text(
+            ready_to_send_count=message_summary.ready_to_send,
+            has_public_url=bool(state.public_base_url),
+        ),
         color=ft.Colors.GREY_700,
     )
 
-    def save_public_url_to_state() -> str | None:
-        raw_value = public_base_url_field.value or ""
-        cleaned_value = raw_value.strip()
+    def get_public_url_or_show_error() -> str | None:
+        public_base_url = state.public_base_url
 
-        if not cleaned_value:
-            status.show_error("Please paste the public RSVP tunnel URL first.")
+        if not public_base_url:
+            status.show_error(
+                "Start the public RSVP link before previewing or sending invitations."
+            )
             return None
 
-        if not (
-            cleaned_value.startswith("https://")
-            or cleaned_value.startswith("http://")
-        ):
-            status.show_error("Public RSVP URL must start with http:// or https://")
-            return None
+        return public_base_url
 
-        state.public_base_url = cleaned_value
-        return cleaned_value
+    def on_start_public_rsvp_link(_: ft.ControlEvent) -> None:
+        logger.info("Start public RSVP link button clicked.")
+
+        if state.event_id is None:
+            status.show_error("No event selected.")
+            return
+
+        try:
+            status.show_success(
+                "Starting public RSVP link. This may take a few seconds."
+            )
+
+            public_base_url = context.runtime.start_public_tunnel_if_needed()
+            state.public_base_url = public_base_url
+
+            logger.info("Public RSVP link ready: %s", public_base_url)
+
+            status.show_success("Public RSVP link is ready.")
+            render_dashboard_screen(context)
+
+        except RsvpRuntimeError as exc:
+            logger.exception("Failed to start public RSVP link.")
+            status.show_error(str(exc))
+
+        except Exception:
+            logger.exception("Unexpected error while starting public RSVP link.")
+            status.show_error("Something went wrong while starting the public RSVP link.")
 
     def on_preview_invitation(_: ft.ControlEvent) -> None:
         logger.info("Invitation preview button clicked.")
@@ -233,7 +255,7 @@ def render_dashboard_screen(context: AppContext) -> None:
             status.show_error("No event selected.")
             return
 
-        public_base_url = save_public_url_to_state()
+        public_base_url = get_public_url_or_show_error()
 
         if public_base_url is None:
             return
@@ -296,7 +318,7 @@ def render_dashboard_screen(context: AppContext) -> None:
             status.show_error("No event selected.")
             return
 
-        public_base_url = save_public_url_to_state()
+        public_base_url = get_public_url_or_show_error()
 
         if public_base_url is None:
             return
@@ -437,6 +459,41 @@ def render_dashboard_screen(context: AppContext) -> None:
                     ],
                 ),
                 section_card(
+                    "RSVP server and public link",
+                    [
+                        ft.Text(
+                            "The local RSVP server runs on your computer. "
+                            "The public link lets guests open their personal RSVP pages."
+                        ),
+                        ft.Text(
+                            f"Local RSVP server: "
+                            f"{'Running' if runtime_status.server_running else 'Not running'}"
+                        ),
+                        ft.Text(f"Local address: {runtime_status.local_base_url}"),
+                        ft.Text(
+                            "Public RSVP link: "
+                            + (
+                                state.public_base_url
+                                if state.public_base_url
+                                else "Not started yet"
+                            ),
+                            selectable=True,
+                        ),
+                        ft.Row(
+                            controls=[
+                                ft.ElevatedButton(
+                                    "Public RSVP link is running"
+                                    if state.public_base_url
+                                    else "Start public RSVP link",
+                                    on_click=on_start_public_rsvp_link,
+                                    disabled=not guests or bool(state.public_base_url),
+                                ),
+                            ],
+                            spacing=12,
+                        ),
+                    ],
+                ),
+                section_card(
                     "RSVP responses",
                     [
                         ft.Text(
@@ -466,11 +523,9 @@ def render_dashboard_screen(context: AppContext) -> None:
                     "Invitation sending",
                     [
                         ft.Text(
-                            "Start the public RSVP tunnel in PowerShell, copy the "
-                            "Cloudflare URL, paste it here, preview the message, "
-                            "then confirm sending."
+                            "Match Telegram contacts, preview the invitation, then confirm sending. "
+                            "The public RSVP link is managed in the section above."
                         ),
-                        public_base_url_field,
                         ft.Row(
                             controls=[
                                 ft.ElevatedButton(
@@ -481,12 +536,16 @@ def render_dashboard_screen(context: AppContext) -> None:
                                 ft.ElevatedButton(
                                     "2. Preview invitation",
                                     on_click=on_preview_invitation,
-                                    disabled=not guests,
+                                    disabled=not guests or not state.public_base_url,
                                 ),
                                 ft.ElevatedButton(
                                     "3. Send invitations",
                                     on_click=on_send_invitations_requested,
-                                    disabled=not guests or message_summary.ready_to_send <= 0,
+                                    disabled=(
+                                        not guests
+                                        or not state.public_base_url
+                                        or message_summary.ready_to_send <= 0
+                                    ),
                                 ),
                             ],
                             spacing=12,
@@ -561,7 +620,6 @@ def show_send_confirmation_dialog(
     page = context.page
     state = context.state
     status = context.status
-
 
     ready_to_send_count = message_summary.ready_to_send
 
@@ -645,10 +703,7 @@ def show_send_confirmation_dialog(
                 ft.Text("Public RSVP URL:", weight=ft.FontWeight.BOLD),
                 ft.Text(public_base_url, selectable=True),
                 ft.Text(""),
-                ft.Text(
-                    "Safety rules:",
-                    weight=ft.FontWeight.BOLD,
-                ),
+                ft.Text("Safety rules:", weight=ft.FontWeight.BOLD),
                 ft.Text("- Only Telegram-matched guests will receive messages."),
                 ft.Text("- Guests with an existing sent message will be skipped."),
                 ft.Text("- The app waits between messages to reduce rate-limit risk."),
@@ -713,6 +768,7 @@ def _dashboard_metric_card(
         bgcolor=ft.Colors.WHITE,
     )
 
+
 def _format_rsvp_response(response: str) -> str:
     if response == "yes":
         return "Yes"
@@ -722,7 +778,16 @@ def _format_rsvp_response(response: str) -> str:
 
     return response
 
-def _build_send_help_text(ready_to_send_count: int) -> str:
+
+def _build_send_help_text(
+    ready_to_send_count: int,
+    has_public_url: bool,
+) -> str:
+    if not has_public_url:
+        return (
+            "Start the public RSVP link before previewing or sending invitations."
+        )
+
     if ready_to_send_count > 0:
         return (
             f"{ready_to_send_count} invitation(s) are ready to send. "
@@ -734,6 +799,7 @@ def _build_send_help_text(ready_to_send_count: int) -> str:
         "First match Telegram contacts. If this stays at 0, the uploaded phone numbers "
         "do not match your Telegram contacts, or all matched guests were already sent."
     )
+
 
 def _go_to_upload(context: AppContext) -> None:
     from app.ui.screens.upload_screen import render_upload_screen

@@ -140,6 +140,11 @@ def render_validation_screen(context: AppContext) -> None:
                 event_id=event_id,
                 invalid_count=len(state.validation_result.invalid_rows),
             )
+            logger.info("Starting local RSVP server after guest import.")
+
+            context.runtime.start_server_if_needed()
+
+            logger.info("Local RSVP server is running.")
 
             logger.info(
                 "Guest import completed from UI. event_id=%s saved=%s invalid=%s duplicates=%s",
@@ -152,7 +157,8 @@ def render_validation_screen(context: AppContext) -> None:
             status.show_success(
                 f"Import finished. Saved {import_result.saved_count} guests. "
                 f"Skipped {import_result.invalid_count} invalid rows and "
-                f"{import_result.duplicate_count} duplicate guests."
+                f"{import_result.duplicate_count} duplicate guests. "
+                f"The local RSVP server is running."
             )
 
             from app.ui.screens.dashboard_screen import render_dashboard_screen
@@ -160,8 +166,10 @@ def render_validation_screen(context: AppContext) -> None:
             render_dashboard_screen(context)
 
         except Exception:
-            logger.exception("Failed to import guests to database.")
-            status.show_error("Something went wrong while saving guests.")
+            logger.exception("Failed to import guests or start RSVP server.")
+            status.show_error(
+                "Something went wrong while saving guests or starting the RSVP server."
+            )
 
         finally:
             db.close()
@@ -174,64 +182,106 @@ def render_validation_screen(context: AppContext) -> None:
     if len(result.invalid_rows) > PREVIEW_ROW_LIMIT:
         invalid_preview_note = f" Showing first {PREVIEW_ROW_LIMIT} invalid rows only."
 
+    actions_row = ft.Row(
+        controls=[
+            ft.ElevatedButton(
+                "Import valid guests",
+                on_click=on_import_valid_rows,
+                disabled=not result.valid_rows,
+            ),
+            ft.TextButton(
+                "Back to upload",
+                on_click=lambda _: _go_back_to_upload(context),
+            ),
+        ],
+        spacing=12,
+        alignment=ft.MainAxisAlignment.END,
+    )
+
     page.add(
         ft.Column(
             controls=[
-                ft.Text("Validation result", size=32, weight=ft.FontWeight.BOLD),
-                ft.Text(
-                    "Step 3 of 3: review the file. "
-                    "The event and guests will be saved only after you click import."
+                ft.Row(
+                    controls=[
+                        ft.Column(
+                            controls=[
+                                ft.Text(
+                                    "Validation result",
+                                    size=32,
+                                    weight=ft.FontWeight.BOLD,
+                                ),
+                                ft.Text(
+                                    "Step 3 of 3: review the file. "
+                                    "The event and guests will be saved only after you click import."
+                                ),
+                            ],
+                            spacing=6,
+                            expand=True,
+                        ),
+                        actions_row,
+                    ],
+                    vertical_alignment=ft.CrossAxisAlignment.START,
                 ),
                 section_card(
                     "Summary",
                     [
-                        ft.Text(f"Valid rows: {len(result.valid_rows)}"),
-                        ft.Text(f"Invalid rows: {len(result.invalid_rows)}"),
+                        ft.Row(
+                            controls=[
+                                _summary_metric(
+                                    label="Valid rows",
+                                    value=len(result.valid_rows),
+                                ),
+                                _summary_metric(
+                                    label="Invalid rows",
+                                    value=len(result.invalid_rows),
+                                ),
+                            ],
+                            spacing=12,
+                        ),
                         ft.Text(
                             "Duplicate protection: if this event already contains a guest "
-                            "with the same phone number, that guest will be skipped."
+                            "with the same phone number, that guest will be skipped.",
+                            color=ft.Colors.GREY_700,
                         ),
-                    ],
-                ),
-                section_card(
-                    "Valid guests",
-                    [
-                        ft.Text(
-                            "No valid guests found."
-                            if not result.valid_rows
-                            else f"Previewing valid guests.{valid_preview_note}"
-                        ),
-                        table_container(valid_rows_table)
-                        if result.valid_rows
-                        else ft.Container(),
-                    ],
-                ),
-                section_card(
-                    "Invalid rows",
-                    [
-                        ft.Text(
-                            "No invalid rows found."
-                            if not result.invalid_rows
-                            else f"Previewing invalid rows.{invalid_preview_note}"
-                        ),
-                        table_container(invalid_rows_table)
-                        if result.invalid_rows
-                        else ft.Container(),
                     ],
                 ),
                 ft.Row(
                     controls=[
-                        ft.ElevatedButton(
-                            "Import valid guests",
-                            on_click=on_import_valid_rows,
-                            disabled=not result.valid_rows,
+                        ft.Container(
+                            content=section_card(
+                                "Valid guests",
+                                [
+                                    ft.Text(
+                                        "No valid guests found."
+                                        if not result.valid_rows
+                                        else f"Previewing valid guests.{valid_preview_note}"
+                                    ),
+                                    table_container(valid_rows_table, height=360)
+                                    if result.valid_rows
+                                    else ft.Container(),
+                                ],
+                            ),
+                            expand=True,
                         ),
-                        ft.TextButton(
-                            "Back to upload",
-                            on_click=lambda _: _go_back_to_upload(context),
+                        ft.Container(
+                            content=section_card(
+                                "Invalid rows",
+                                [
+                                    ft.Text(
+                                        "No invalid rows found."
+                                        if not result.invalid_rows
+                                        else f"Previewing invalid rows.{invalid_preview_note}"
+                                    ),
+                                    table_container(invalid_rows_table, height=360)
+                                    if result.invalid_rows
+                                    else ft.Container(),
+                                ],
+                            ),
+                            expand=True,
                         ),
                     ],
-                    spacing=12,
+                    spacing=16,
+                    vertical_alignment=ft.CrossAxisAlignment.START,
                 ),
             ],
             spacing=18,
@@ -240,6 +290,21 @@ def render_validation_screen(context: AppContext) -> None:
 
     page.update()
 
+def _summary_metric(label: str, value: int) -> ft.Container:
+    return ft.Container(
+        content=ft.Column(
+            controls=[
+                ft.Text(label, size=13, color=ft.Colors.GREY_700),
+                ft.Text(str(value), size=26, weight=ft.FontWeight.BOLD),
+            ],
+            spacing=4,
+        ),
+        width=160,
+        padding=14,
+        border=ft.border.all(1, ft.Colors.GREY_300),
+        border_radius=12,
+        bgcolor=ft.Colors.WHITE,
+    )
 
 def _go_back_to_upload(context: AppContext) -> None:
     from app.ui.screens.upload_screen import render_upload_screen

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import atexit
 import logging
 
 import flet as ft
 
 from app.core.database import create_database
+from app.services.rsvp_runtime_service import RsvpRuntimeManager
 from app.ui.context import AppContext
 from app.ui.screens.setup_screen import render_setup_screen
 from app.ui.state import AppState
@@ -22,11 +24,15 @@ def main(page: ft.Page) -> None:
 
     state = AppState()
     status = StatusController(page)
+    runtime = RsvpRuntimeManager()
+
+    atexit.register(runtime.stop_all)
 
     context = AppContext(
         page=page,
         state=state,
         status=status,
+        runtime=runtime,
     )
 
     page.title = "Local Wedding RSVP"
