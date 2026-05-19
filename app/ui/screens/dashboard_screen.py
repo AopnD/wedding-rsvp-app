@@ -447,31 +447,57 @@ def render_dashboard_screen(context: AppContext) -> None:
             ],
         )
 
+        summary_column = ft.Container(
+            content=ft.Column(
+                controls=[
+                    ft.Text(f"Total guests: {message_summary.total_guests}"),
+                    ft.Text(f"Telegram matched: {message_summary.telegram_matched}"),
+                    ft.Text(f"Ready to send: {message_summary.ready_to_send}"),
+                    ft.Text(f"Sent: {message_summary.sent}"),
+                    ft.Text(f"Failed: {message_summary.failed}"),
+                    ft.Text(f"Not matched: {message_summary.not_matched}"),
+                    # ft.Text(
+                    #     "No message statuses yet."
+                    #     if not message_summary.statuses
+                    #     else f"Message status preview1.{message_status_preview_note}"
+                    # ),
+                ],
+                spacing=10,
+                tight=True,
+            ),
+            width=220,
+        )
+
+        table_box = (
+            table_container(dialog_message_status_table, height=430)
+            if message_summary.statuses
+            else ft.Container(
+                content=ft.Text("No message statuses yet."),
+                padding=16,
+                border=ft.border.all(1, ft.Colors.GREY_300),
+                border_radius=10,
+                bgcolor=ft.Colors.GREY_100,
+                expand=True,
+            )
+        )
+
         dialog = ft.AlertDialog(
             modal=True,
             title=ft.Text("Invitation status"),
             content=ft.Container(
-                content=ft.Column(
+                content=ft.Row(
                     controls=[
-                        ft.Text(f"Total guests: {message_summary.total_guests}"),
-                        ft.Text(f"Telegram matched: {message_summary.telegram_matched}"),
-                        ft.Text(f"Ready to send: {message_summary.ready_to_send}"),
-                        ft.Text(f"Sent: {message_summary.sent}"),
-                        ft.Text(f"Failed: {message_summary.failed}"),
-                        ft.Text(f"Not matched: {message_summary.not_matched}"),
-                        ft.Text(
-                            "No message statuses yet."
-                            if not message_summary.statuses
-                            else f"Message status preview.{message_status_preview_note}"
+                        summary_column,
+                        ft.Container(
+                            content=table_box,
+                            expand=True,
                         ),
-                        table_container(dialog_message_status_table, height=420)
-                        if message_summary.statuses
-                        else ft.Container(),
                     ],
-                    spacing=8,
-                    tight=True,
+                    spacing=24,
+                    vertical_alignment=ft.CrossAxisAlignment.START,
                 ),
-                width=950,
+                width=1050,
+                height=500,
             ),
             actions=[
                 ft.TextButton("Close", on_click=lambda _: _close_dialog(page, dialog)),
