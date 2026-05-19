@@ -344,7 +344,12 @@ def render_dashboard_screen(context: AppContext) -> None:
                 f"Telegram matching finished. "
                 f"Matched {result.matched_count} of {result.total_guests} guests."
             )
-
+            if result.matched_count > 0:
+                state.invitation_flow_matched_event_id = state.event_id
+                state.invitation_flow_matched_total_guests = dashboard_summary.total_guests
+            else:
+                state.invitation_flow_matched_event_id = None
+                state.invitation_flow_matched_total_guests = None
             render_dashboard_screen(context)
 
         except TelegramServiceError as exc:
@@ -489,6 +494,21 @@ def render_dashboard_screen(context: AppContext) -> None:
     rsvp_preview_note = ""
     if len(rsvp_statuses) > PREVIEW_ROW_LIMIT:
         rsvp_preview_note = f" Showing first {PREVIEW_ROW_LIMIT} RSVP responses only."
+    show_rsvp_setup_card = state.rsvp_runtime_indicator_status == "not_started"
+
+    show_invitation_sending_card = (
+        bool(state.public_base_url)
+        and state.rsvp_runtime_indicator_status in {"live", "warning"}
+    )
+    has_completed_telegram_matching_for_current_guest_list = (
+            state.invitation_flow_matched_event_id == state.event_id
+            and state.invitation_flow_matched_total_guests == dashboard_summary.total_guests
+            and message_summary.telegram_matched > 0
+    )
+
+    show_match_telegram_button = not has_completed_telegram_matching_for_current_guest_list
+
+    show_preview_and_send_buttons = has_completed_telegram_matching_for_current_guest_list
 
     page.add(
         ft.Column(
@@ -526,13 +546,9 @@ def render_dashboard_screen(context: AppContext) -> None:
                             content=ft.Column(
                                 controls=[
                                     ft.Text(
-                                        "Quick views",
+                                        "Guest list",
                                         size=20,
                                         weight=ft.FontWeight.BOLD,
-                                    ),
-                                    ft.Text(
-                                        "Open detailed tables without cluttering the dashboard.",
-                                        color=ft.Colors.GREY_700,
                                     ),
                                     ft.Row(
                                         controls=[
@@ -541,6 +557,28 @@ def render_dashboard_screen(context: AppContext) -> None:
                                                 on_click=on_open_guests_dialog,
                                                 disabled=not guests,
                                             ),
+                                        ],
+                                        spacing=12,
+                                    ),
+                                ],
+                                spacing=12,
+                            ),
+                            padding=18,
+                            border=ft.border.all(1, ft.Colors.GREY_300),
+                            border_radius=12,
+                            bgcolor=ft.Colors.WHITE,
+                            width=260,
+                        ),
+                        ft.Container(
+                            content=ft.Column(
+                                controls=[
+                                    ft.Text(
+                                        "Invitation status",
+                                        size=20,
+                                        weight=ft.FontWeight.BOLD,
+                                    ),
+                                    ft.Row(
+                                        controls=[
                                             ft.ElevatedButton(
                                                 "Invitation status",
                                                 on_click=on_open_invitation_status_dialog,
@@ -556,7 +594,7 @@ def render_dashboard_screen(context: AppContext) -> None:
                             border=ft.border.all(1, ft.Colors.GREY_300),
                             border_radius=12,
                             bgcolor=ft.Colors.WHITE,
-                            width=360,
+                            width=260,
                         ),
                     ],
                     spacing=16,
@@ -651,63 +689,75 @@ def render_dashboard_screen(context: AppContext) -> None:
                             ),
                         ],
                     )
-                    if state.rsvp_runtime_indicator_status == "not_started"
+                    if show_rsvp_setup_card
                     else ft.Container()
                 ),
-                section_card(
-                    "RSVP responses",
-                    [
-                        ft.Text(
-                            "No RSVP responses yet."
-                            if not rsvp_statuses
-                            else f"Latest RSVP response per guest.{rsvp_preview_note}"
-                        ),
-                        table_container(rsvp_status_table, height=320)
-                        if rsvp_statuses
-                        else ft.Container(),
-                    ],
-                ),
-                section_card(
-                    "Invitation sending",
-                    [
-                        ft.Text(
-                            "Match Telegram contacts, preview the invitation, then confirm sending. "
-                            "The public RSVP link is managed in the section above."
-                        ),
-                        ft.Row(
-                            controls=[
-                                ft.ElevatedButton(
-                                    "1. Match Telegram contacts",
-                                    on_click=on_match_telegram_contacts,
-                                    disabled=not guests,
-                                ),
-                                ft.ElevatedButton(
-                                    "2. Preview invitation",
-                                    on_click=on_preview_invitation,
-                                    disabled=not guests or not state.public_base_url,
-                                ),
-                                ft.ElevatedButton(
-                                    "3. Send invitations",
-                                    on_click=on_send_invitations_requested,
-                                    disabled=(
-                                        not guests
-                                        or not state.public_base_url
-                                        or message_summary.ready_to_send <= 0
-                                    ),
-                                ),
-                            ],
-                            spacing=12,
-                        ),
-                        send_help_text,
-                        ft.Container(
-                            content=invitation_preview_text,
-                            padding=14,
-                            border=ft.border.all(1, ft.Colors.GREY_300),
-                            border_radius=10,
-                            bgcolor=ft.Colors.GREY_100,
-                            width=760,
-                        ),
-                    ],
+                # section_card(
+                #     "RSVP responses",
+                #     [
+                #         ft.Text(
+                #             "No RSVP responses yet."
+                #             if not rsvp_statuses
+                #             else f"Latest RSVP response per guest.{rsvp_preview_note}"
+                #         ),
+                #         table_container(rsvp_status_table, height=320)
+                #         if rsvp_statuses
+                #         else ft.Container(),
+                #     ],
+                # ),
+                (
+                    section_card(
+                        "Invitation sending",
+                        [
+                            ft.Text(
+                                "Match Telegram contacts, preview the invitation, then confirm sending. "
+                                "The public RSVP link is ready."
+                            ),
+                            ft.Row(
+                                controls=[
+                                    ft.ElevatedButton(
+                                        "1. Match Telegram contacts",
+                                        on_click=on_match_telegram_contacts,
+                                        disabled=not guests,
+                                    )
+                                    if show_match_telegram_button
+                                    else ft.Container(),
+
+                                    ft.ElevatedButton(
+                                        "2. Preview invitation",
+                                        on_click=on_preview_invitation,
+                                        disabled=not guests or not state.public_base_url,
+                                    )
+                                    if show_preview_and_send_buttons
+                                    else ft.Container(),
+
+                                    ft.ElevatedButton(
+                                        "3. Send invitations",
+                                        on_click=on_send_invitations_requested,
+                                        disabled=(
+                                                not guests
+                                                or not state.public_base_url
+                                                or message_summary.ready_to_send <= 0
+                                        ),
+                                    )
+                                    if show_preview_and_send_buttons
+                                    else ft.Container(),
+                                ],
+                                spacing=12,
+                            ),
+                            send_help_text,
+                            ft.Container(
+                                content=invitation_preview_text,
+                                padding=14,
+                                border=ft.border.all(1, ft.Colors.GREY_300),
+                                border_radius=10,
+                                bgcolor=ft.Colors.GREY_100,
+                                width=760,
+                            ),
+                        ],
+                    )
+                    if show_invitation_sending_card
+                    else ft.Container()
                 ),
                 ft.Row(
                     controls=[
@@ -1020,6 +1070,9 @@ def _build_send_help_text(
 
 
 def _go_to_upload(context: AppContext) -> None:
+    context.state.invitation_flow_matched_event_id = None
+    context.state.invitation_flow_matched_total_guests = None
+
     from app.ui.screens.upload_screen import render_upload_screen
 
     render_upload_screen(context)

@@ -27,10 +27,17 @@ class AppState:
         # Remembered while the app is open.
         # Set automatically when the app starts the public Cloudflare tunnel.
         self.public_base_url: str | None = None
+
         # Dashboard runtime indicator.
         # Values: "not_started", "live", "warning", "failed"
         self.rsvp_runtime_indicator_status: str = "not_started"
         self.rsvp_runtime_indicator_message: str | None = None
+
+        # Invitation sending UI flow.
+        # These remember whether Telegram matching was already completed
+        # for the currently loaded guest list.
+        self.invitation_flow_matched_event_id: int | None = None
+        self.invitation_flow_matched_total_guests: int | None = None
 
     def clear_import_state(self) -> None:
         self.selected_file_path = None
