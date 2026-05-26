@@ -76,9 +76,13 @@ class TelegramMatchResult:
 
 def get_telegram_credentials_from_env() -> TelegramCredentials:
     """
-    Read Telegram API credentials from environment variables.
+    Read Telegram API credentials.
 
-    Required PowerShell variables:
+    Credentials can come from:
+    - the local .env file in the project root
+    - real OS environment variables
+
+    Required values:
     - RSVP_TELEGRAM_API_ID
     - RSVP_TELEGRAM_API_HASH
     """
