@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.importers.guest_validator import ValidationResult
-
+from app.services.startup_service import StartupEventState
 
 class AppState:
     """
@@ -39,6 +39,42 @@ class AppState:
         self.invitation_flow_matched_event_id: int | None = None
         self.invitation_flow_matched_total_guests: int | None = None
 
+    def load_startup_event(self, startup_event: StartupEventState) -> None:
+        """
+        Restore UI state from an event already saved in the database.
+
+        This is used when the app opens and detects an existing event.
+        """
+
+        self.event_id = startup_event.event_id
+
+        self.couple_names = startup_event.couple_names
+        self.wedding_date = startup_event.wedding_date
+        self.venue_name = startup_event.venue_name
+        self.venue_address = startup_event.venue_address
+
+        self.selected_file_path = None
+        self.validation_result = None
+
+        # A Cloudflare quick tunnel does not survive app restart.
+        # So we intentionally do not restore public_base_url.
+        self.public_base_url = None
+
+        self.rsvp_runtime_indicator_status = "not_started"
+        self.rsvp_runtime_indicator_message = (
+            "Saved event loaded from the local database. "
+            "Start the public RSVP link again before sending follow-ups."
+        )
+
+        # If this event already has Telegram-matched guests in the database,
+        # allow the user to preview/send without forcing another match step.
+        if startup_event.telegram_matched_guests > 0:
+            self.invitation_flow_matched_event_id = startup_event.event_id
+            self.invitation_flow_matched_total_guests = startup_event.total_guests
+        else:
+            self.invitation_flow_matched_event_id = None
+            self.invitation_flow_matched_total_guests = None
+
     def clear_import_state(self) -> None:
         self.selected_file_path = None
         self.validation_result = None
@@ -55,5 +91,8 @@ class AppState:
 
         self.rsvp_runtime_indicator_status = "not_started"
         self.rsvp_runtime_indicator_message = None
+
+        self.invitation_flow_matched_event_id = None
+        self.invitation_flow_matched_total_guests = None
 
         self.clear_import_state()
