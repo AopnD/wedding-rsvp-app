@@ -1,11 +1,29 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 
-BASE_DIR = Path(__file__).resolve().parents[2]
+def get_base_dir() -> Path:
+    """
+    Return the folder where app-managed files should live.
+
+    Development:
+    - Uses the project root.
+
+    PyInstaller packaged app:
+    - Uses the folder where the .exe is located.
+    """
+
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+
+    return Path(__file__).resolve().parents[2]
+
+
+BASE_DIR = get_base_dir()
 
 ENV_FILE_PATH = BASE_DIR / ".env"
 

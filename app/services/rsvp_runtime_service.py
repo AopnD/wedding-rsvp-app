@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import logging
-import platform
-import subprocess
-import sys
+import threading
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from pathlib import Path
-from typing import TextIO
 
-from app.core.config import DATA_DIR
+import uvicorn
+
+# IMPORTANT:
+# Import the FastAPI app object directly.
+# Do NOT pass "app.backend.api:app" as a string in the packaged app.
+# PyInstaller can miss dynamic import strings, causing:
+# ModuleNotFoundError: No module named 'app.backend'
+from app.backend.api import app as fastapi_app
 from app.services.tunnel_service import TunnelProcess, start_quick_tunnel, stop_tunnel
 
 
@@ -41,14 +44,15 @@ class RsvpRuntimeManager:
     Manages the local RSVP server and public Cloudflare tunnel.
 
     Alpha behavior:
-    - The local FastAPI RSVP server runs as a subprocess.
-    - The public tunnel is started only when the user clicks a button.
+    - The local FastAPI RSVP server runs inside this desktop app process
+      on a background thread.
+    - The public Cloudflare tunnel runs as a separate cloudflared process.
     - The public URL is kept in memory while the desktop app is open.
     """
 
     def __init__(self) -> None:
-        self._server_process: subprocess.Popen[str] | None = None
-        self._server_log_file: TextIO | None = None
+        self._server: uvicorn.Server | None = None
+        self._server_thread: threading.Thread | None = None
         self._tunnel: TunnelProcess | None = None
 
     @property
@@ -74,9 +78,6 @@ class RsvpRuntimeManager:
     def is_server_running(self) -> bool:
         """
         Return True if the RSVP server responds to /health.
-
-        This works even if the server was started earlier by this manager
-        and is safer than checking only the subprocess state.
         """
 
         return _is_health_check_ok()
@@ -94,58 +95,60 @@ class RsvpRuntimeManager:
 
     def start_server_if_needed(self) -> None:
         """
-        Start uvicorn for the local FastAPI RSVP server if it is not already running.
+        Start the local FastAPI RSVP server if it is not already running.
+
+        Packaging rules:
+        - Do not start this with sys.executable -m uvicorn.
+          In PyInstaller, sys.executable is LocalWeddingRSVP.exe,
+          which opens another desktop app window.
+        - Do not pass the app as "app.backend.api:app".
+          PyInstaller may miss that dynamic import.
         """
 
         if self.is_server_running():
             logger.info("RSVP server already running at %s", LOCAL_BASE_URL)
             return
 
-        if self._server_process is not None and self._server_process.poll() is None:
-            logger.info("RSVP server process exists; waiting for health check.")
+        if self._server_thread is not None and self._server_thread.is_alive():
+            logger.info("RSVP server thread exists; waiting for health check.")
             self._wait_for_server_health()
             return
 
-        logs_dir = DATA_DIR / "logs"
-        logs_dir.mkdir(parents=True, exist_ok=True)
-
-        server_log_path = logs_dir / "rsvp_server.log"
-        self._server_log_file = server_log_path.open("a", encoding="utf-8")
-
-        command = [
-            sys.executable,
-            "-m",
-            "uvicorn",
-            "app.backend.api:app",
-            "--host",
-            LOCAL_HOST,
-            "--port",
-            str(LOCAL_PORT),
-        ]
-
-        logger.info("Starting RSVP server: %s", " ".join(command))
-        logger.info("RSVP server logs: %s", server_log_path)
-
-        creation_flags = 0
-
-        if platform.system().lower() == "windows":
-            creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        logger.info("Starting RSVP server in background thread at %s", LOCAL_BASE_URL)
 
         try:
-            self._server_process = subprocess.Popen(
-                command,
-                stdout=self._server_log_file,
-                stderr=subprocess.STDOUT,
-                text=True,
-                creationflags=creation_flags,
+            config = uvicorn.Config(
+                app=fastapi_app,
+                host=LOCAL_HOST,
+                port=LOCAL_PORT,
+                log_level="warning",
+                access_log=False,
+                log_config=None,
+                lifespan="on",
             )
+
+            self._server = uvicorn.Server(config=config)
+
+            self._server_thread = threading.Thread(
+                target=self._run_server,
+                name="rsvp-server",
+                daemon=True,
+            )
+
+            self._server_thread.start()
+            self._wait_for_server_health()
+
+            logger.info("RSVP server started successfully at %s", LOCAL_BASE_URL)
+
+        except RsvpRuntimeError:
+            raise
+
         except Exception as exc:
-            self._close_server_log_file()
-            raise RsvpRuntimeError("Could not start the local RSVP server.") from exc
-
-        self._wait_for_server_health()
-
-        logger.info("RSVP server started successfully at %s", LOCAL_BASE_URL)
+            logger.exception("Failed to start RSVP server.")
+            raise RsvpRuntimeError(
+                "Could not start the local RSVP server. "
+                "Check data/logs/app.log for details."
+            ) from exc
 
     def start_public_tunnel_if_needed(self) -> str:
         """
@@ -175,8 +178,6 @@ class RsvpRuntimeManager:
     def stop_all(self) -> None:
         """
         Stop the public tunnel and local RSVP server.
-
-        This is called when the desktop app exits.
         """
 
         logger.info("Stopping RSVP runtime.")
@@ -189,50 +190,47 @@ class RsvpRuntimeManager:
             finally:
                 self._tunnel = None
 
-        if self._server_process is not None and self._server_process.poll() is None:
-            logger.info("Stopping RSVP server process.")
+        if self._server is not None:
+            logger.info("Stopping RSVP server.")
+            self._server.should_exit = True
 
-            self._server_process.terminate()
+        if self._server_thread is not None and self._server_thread.is_alive():
+            self._server_thread.join(timeout=10)
 
-            try:
-                self._server_process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                logger.warning("RSVP server did not stop gracefully; killing process.")
-                self._server_process.kill()
+            if self._server_thread.is_alive():
+                logger.warning("RSVP server thread did not stop within timeout.")
 
-        self._server_process = None
-        self._close_server_log_file()
+        self._server = None
+        self._server_thread = None
+
+    def _run_server(self) -> None:
+        if self._server is None:
+            return
+
+        try:
+            self._server.run()
+        except Exception:
+            logger.exception("RSVP server crashed.")
 
     def _wait_for_server_health(self, timeout_seconds: int = 15) -> None:
         started_at = time.monotonic()
 
         while time.monotonic() - started_at < timeout_seconds:
-            if self._server_process is not None and self._server_process.poll() is not None:
-                raise RsvpRuntimeError(
-                    "The RSVP server stopped while starting. "
-                    "Check data/logs/rsvp_server.log for details."
-                )
-
             if _is_health_check_ok():
                 return
+
+            if self._server_thread is not None and not self._server_thread.is_alive():
+                raise RsvpRuntimeError(
+                    "The RSVP server stopped while starting. "
+                    "Check data/logs/app.log for details."
+                )
 
             time.sleep(0.5)
 
         raise RsvpRuntimeError(
             "Timed out while starting the RSVP server. "
-            "Check data/logs/rsvp_server.log for details."
+            "Check data/logs/app.log for details."
         )
-
-    def _close_server_log_file(self) -> None:
-        if self._server_log_file is None:
-            return
-
-        try:
-            self._server_log_file.close()
-        except Exception:
-            logger.exception("Failed to close RSVP server log file.")
-        finally:
-            self._server_log_file = None
 
 
 def _is_health_check_ok() -> bool:

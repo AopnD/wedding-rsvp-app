@@ -133,6 +133,15 @@ def start_quick_tunnel(
     logger.info("Starting cloudflared tunnel for %s", local_url)
 
     try:
+        startupinfo = None
+        creationflags = 0
+
+        if platform.system().lower() == "windows":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+            creationflags = subprocess.CREATE_NO_WINDOW
+
         process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
@@ -140,6 +149,8 @@ def start_quick_tunnel(
             text=True,
             encoding="utf-8",
             errors="replace",
+            startupinfo=startupinfo,
+            creationflags=creationflags,
         )
     except Exception as exc:
         raise TunnelError("Could not start cloudflared.") from exc

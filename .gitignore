@@ -23,6 +23,8 @@ __pycache__/
 # Build
 dist/
 build/
+LocalWeddingRSVP.spec
+
 
 # Local app data
 data/
