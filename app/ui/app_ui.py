@@ -13,7 +13,7 @@ from app.ui.screens.dashboard_screen import render_dashboard_screen
 from app.ui.screens.setup_screen import render_setup_screen
 from app.ui.state import AppState
 from app.ui.status import StatusController
-
+from app.services.telegram_startup_service import check_telegram_startup_state
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +43,26 @@ def main(page: ft.Page) -> None:
     page.padding = 24
     page.theme_mode = ft.ThemeMode.LIGHT
     page.scroll = ft.ScrollMode.AUTO
+
+    telegram_startup_state = check_telegram_startup_state()
+
+    if telegram_startup_state.mode == "credentials_required":
+        from app.ui.screens.telegram_setup_screen import render_telegram_setup_screen
+
+        render_telegram_setup_screen(
+            context=context,
+            message=telegram_startup_state.message,
+        )
+        return
+
+    if telegram_startup_state.mode == "login_required":
+        from app.ui.screens.telegram_login_screen import render_telegram_login_screen
+
+        render_telegram_login_screen(
+            context=context,
+            message=telegram_startup_state.message,
+        )
+        return
 
     startup_event = _load_startup_event_or_none()
 
