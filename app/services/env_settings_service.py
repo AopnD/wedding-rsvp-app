@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from dataclasses import dataclass
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from telethon import TelegramClient
 
 from app.core.config import ENV_FILE_PATH
 
@@ -54,7 +59,6 @@ def validate_telegram_env_settings(
 
     if not cleaned_api_hash:
         errors.append("Telegram API hash is required.")
-
     elif len(cleaned_api_hash) < 10:
         errors.append("Telegram API hash looks too short.")
 
